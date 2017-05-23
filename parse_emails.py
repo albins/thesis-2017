@@ -256,7 +256,6 @@ if __name__ == '__main__':
     cluster_status = Counter()
     dates = []
     syslog_windows = []
-    log_events = Counter()
 
     for result in results:
         dates.append(result['date'])
@@ -282,9 +281,6 @@ if __name__ == '__main__':
             last_log_entry = part_data['syslog'][-1]['date']
             delta = last_log_entry - first_log_entry
             syslog_windows.append(delta)
-            for event in part_data['syslog']:
-                log_events[event['facility']] += 1
-
 
         for disk in part_data['registry']:
             if disk['device'] == "NotPresent":
@@ -312,6 +308,6 @@ if __name__ == '__main__':
     print("Disk statuses were: {}".format(format_counter(disk_status)))
     print("Failures per cluster were: {}".format(format_counter(cluster_status)))
     print("Date range was {}--{}".format(min(dates), max(dates)))
-    print("Syslog windows were in the range {}--{}".format(min([x for x in syslog_windows if x > datetime.timedelta(0)]),
-                                                           max(syslog_windows)))
-    print("Common log events were: {}".format(format_counter(log_events)))
+    print("Syslog windows were in the range {}--{}".format(
+        min([x for x in syslog_windows if x > datetime.timedelta(0)]),
+        max(syslog_windows)))
