@@ -13,16 +13,18 @@ import gzip
 from functools import partial
 from collections import Counter
 import re
+import datetime
 
 import lxml.etree
 import dateparser
+import dateutil
 
 log = logging.getLogger(__name__)
 ch = logging.StreamHandler(sys.stdout)
 formatter = logging.Formatter('%(name)s %(levelname)s: %(message)s')
 ch.setFormatter(formatter)
 log.addHandler(ch)
-log.setLevel(logging.INFO)
+log.setLevel(logging.NOTSET)
 
 ASUP_NS = "http://asup_search.netapp.com/ns/ASUP/1.1"
 LOG_NS = "http://asup_search.netapp.com/ns/T_EMS_LOCAL_LOG/1.0"
@@ -30,7 +32,9 @@ LOG_NS = "http://asup_search.netapp.com/ns/T_EMS_LOCAL_LOG/1.0"
 NAMESPACES = {'l': LOG_NS,
               'a': ASUP_NS}
 
-cluster_re = re.compile(".*db(?P<cluster>.*)\s+\(.*")
+cluster_re = re.compile(".*?db(?P<cluster>.*?)\d+\s+\(.*")
+disk_re = re.compile("(?P<connector>[0-9][a-d])\.((?P<shelf>\d{1,2})\.)?(?P<bay>\d{1,2})")
+syslog_re = re.compile('(?P<some_code>([0-9]|[a-f])+\.([0-9]|[a-f])+\s([0-9]|[a-f])+)\s(?P<date>.*?)\s+\[(?P<facility>.*):(?P<log_level>.*)\] (?P<body>.*)')
 
 
 def read_xml_string(element, *element_hierarchy):
@@ -49,8 +53,11 @@ def timed(task_name, time_record=[]):
 
 
 def read_gzipped_log(gzip_fn):
+    log = []
     with gzip.open(gzip_fn, 'r') as log_f:
-        return log_f.read().decode('utf-8')
+        for line in log_f:
+            log.append(line.decode('utf-8'))
+    return log
 
 
 def read_context(xml_fn):
@@ -121,9 +128,20 @@ def read_registry(txt_fn):
 
         return completed_statements
 
+def parse_syslog_msg(msg):
+    match = syslog_re.match(msg)
+    date_parsed = dateutil.parser.parse(match.group('date'))
+    result = {'original': msg,
+              'facility': match.group('facility'),
+              'log_level': match.group('log_level'),
+              'date': date_parsed,
+    }
+    return result
+
 
 def read_messages_log(gzip_fn):
-    return read_gzipped_log(gzip_fn)
+    log = read_gzipped_log(gzip_fn)
+    return [parse_syslog_msg(msg) for msg in log]
 
 
 def read_ems_log_file(gzip_fn):
@@ -197,9 +215,12 @@ def parse_mail(mail):
     if not part_data:
         log.warning('Mail "{}" does not have any attachments'
                     .format(mail['Subject']))
+    cluster = cluster_re.match(mail['Subject']).group('cluster').strip()
+    if not cluster:
+        raise ValueError(cluster_re.match(mail['Subject']))
 
     return {'subject': mail['Subject'],
-            'cluster': cluster_re.match(mail['Subject']).group('cluster'),
+            'cluster': cluster,
             'date': dateparser.parse(mail['Date']),
             'parts_data': part_data}
 
@@ -207,6 +228,13 @@ def parse_mail(mail):
 def is_signature(part):
     content_type = part.get('Content-Type').split(";")[0]
     return content_type == 'application/pkcs7-signature'
+
+
+def format_counter(counter):
+    return ", ".join(["{} ({})".format(k, c) for k, c in
+                      sorted(counter.items(),
+                             key=lambda tpl: tpl[1],
+                             reverse=True)])
 
 
 if __name__ == '__main__':
@@ -225,7 +253,10 @@ if __name__ == '__main__':
     no_data = 0
     missing_data = Counter()
     disk_status = Counter()
+    cluster_status = Counter()
     dates = []
+    syslog_windows = []
+    log_events = Counter()
 
     for result in results:
         dates.append(result['date'])
@@ -241,13 +272,33 @@ if __name__ == '__main__':
                 missing_data[k] += 1
         if found_missing:
             partial_data += 1
-            continue
+
+            if not part_data['registry']:
+                # Without this, we cannot do analysis
+                continue
+
+        if part_data['syslog']:
+            first_log_entry = part_data['syslog'][0]['date']
+            last_log_entry = part_data['syslog'][-1]['date']
+            delta = last_log_entry - first_log_entry
+            syslog_windows.append(delta)
+            for event in part_data['syslog']:
+                log_events[event['facility']] += 1
+
 
         for disk in part_data['registry']:
-            device_name = "{}:{}".format(result['cluster'], disk['device'])
             if disk['device'] == "NotPresent":
                 continue
+
+            shelf = disk_re.match(disk['device']).group('shelf')
+            bay = disk_re.match(disk['device']).group('bay')
+
+            if not shelf:
+                device_name = "{}:{}".format(result['cluster'], bay)
+            else:
+                device_name = "{}:{}.{}".format(result['cluster'], shelf, bay)
             disk_status[device_name] += 1
+            cluster_status[result['cluster']] += 1
 
     print(("Read {} emails, of which {} had a complete data set, {}"
            " contained no data, and {} had partial data. Execution took"
@@ -256,8 +307,11 @@ if __name__ == '__main__':
                   time_records[0]))
 
     print("The following data was missing: {}."
-          .format(", ".join(["{} ({})".format(k, c)
-                             for k, c in missing_data.items()])))
+          .format(format_counter(missing_data)))
     print("Saw {} disk failures:".format(sum(disk_status.values())))
-    print(disk_status)
+    print("Disk statuses were: {}".format(format_counter(disk_status)))
+    print("Failures per cluster were: {}".format(format_counter(cluster_status)))
     print("Date range was {}--{}".format(min(dates), max(dates)))
+    print("Syslog windows were in the range {}--{}".format(min([x for x in syslog_windows if x > datetime.timedelta(0)]),
+                                                           max(syslog_windows)))
+    print("Common log events were: {}".format(format_counter(log_events)))
