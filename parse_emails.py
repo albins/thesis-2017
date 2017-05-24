@@ -11,7 +11,7 @@ import logging
 import sys
 import gzip
 from functools import partial
-from collections import Counter
+from collections import Counter, defaultdict
 import re
 import datetime
 
@@ -68,7 +68,7 @@ def read_context(xml_fn):
 
     data_rows = tree.xpath('/l:T_EMS_LOCAL_LOG/a:ROW', namespaces=NAMESPACES)
     for row in data_rows:
-        parameters['time'] = read_xml_string(row, 'l:time')
+        parameters['time'] = dateparser.parse(read_xml_string(row, 'l:time'))
         parameters['severity'] = read_xml_string(row, 'l:severity')
         parameters['event_type'] = read_xml_string(row, 'l:messagename')
 
@@ -93,7 +93,14 @@ def parse_issue_statement(statement):
     for key_value in re.split("\s*,\s*", tail):
         kv_cleaned = key_value.strip()
         match = kv_re.match(kv_cleaned)
-        data[match.group('key')] = match.group('value')
+        value = match.group('value')
+        key = match.group('key')
+
+        if key == 'timefailed' or key == 'timelastseen':
+            timestamp = re.match(r"(\d+)\s", value).group(1)
+            value = dateparser.parse(timestamp)
+
+        data[key] = value
 
     return data
 
@@ -194,6 +201,10 @@ def parse_mail_part(part, mail):
         with maybe_missing():
             context = read_context(wd('disk-fault-context.xml'))
 
+    if all([x is None for x in [registry, ems_log, syslog, context]]):
+        # No data was extracted
+        return None
+
     return {'registry': registry,
             'ems_log': ems_log,
             'syslog': syslog,
@@ -201,7 +212,7 @@ def parse_mail_part(part, mail):
 
 
 def parse_mail(mail):
-    part_data = []
+    part_data = None
     for part in mail.walk():
         if part.get_content_maintype() == 'multipart':
             continue
@@ -210,7 +221,10 @@ def parse_mail(mail):
         if is_signature(part):
             continue
 
-        part_data.append(parse_mail_part(part, mail))
+        attached_data = parse_mail_part(part, mail)
+        if attached_data:
+            part_data = attached_data
+            break
 
     if not part_data:
         log.warning('Mail "{}" does not have any attachments'
@@ -256,6 +270,8 @@ if __name__ == '__main__':
     cluster_status = Counter()
     dates = []
     syslog_windows = []
+    failure_reasons = Counter()
+    fault_times = defaultdict(list)
 
     for result in results:
         dates.append(result['date'])
@@ -263,7 +279,7 @@ if __name__ == '__main__':
             no_data += 1
             continue
 
-        part_data = result['parts_data'][0]
+        part_data = result['parts_data']
         found_missing = False
         for k, v in part_data.items():
             if v is None:
@@ -275,6 +291,8 @@ if __name__ == '__main__':
             if not part_data['registry']:
                 # Without this, we cannot do analysis
                 continue
+        if part_data['context']:
+            failure_reasons[part_data['context']['failure_reason']] += 1
 
         if part_data['syslog']:
             first_log_entry = part_data['syslog'][0]['date']
@@ -282,9 +300,14 @@ if __name__ == '__main__':
             delta = last_log_entry - first_log_entry
             syslog_windows.append(delta)
 
+        num_failed_disks = 0
+        registry_failed_dates = []
         for disk in part_data['registry']:
             if disk['device'] == "NotPresent":
                 continue
+
+            num_failed_disks += 1
+            registry_failed_dates.append(disk['timefailed'])
 
             shelf = disk_re.match(disk['device']).group('shelf')
             bay = disk_re.match(disk['device']).group('bay')
@@ -295,6 +318,15 @@ if __name__ == '__main__':
                 device_name = "{}:{}.{}".format(result['cluster'], shelf, bay)
             disk_status[device_name] += 1
             cluster_status[result['cluster']] += 1
+
+        if part_data['context'] and len(registry_failed_dates) <= 1:
+            context_fault_date = part_data['context']['time']
+            fault_times[result['cluster']].append(context_fault_date)
+        elif registry_failed_dates:
+            fault_times[result['cluster']] += registry_failed_dates
+        else:
+            fault_times[result['cluster']].append(result['date'])
+
 
     print(("Read {} emails, of which {} had a complete data set, {}"
            " contained no data, and {} had partial data. Execution took"
@@ -311,3 +343,5 @@ if __name__ == '__main__':
     print("Syslog windows were in the range {}--{}".format(
         min([x for x in syslog_windows if x > datetime.timedelta(0)]),
         max(syslog_windows)))
+    print("Observed failure reasons (from context) were: {}"
+          .format(format_counter(failure_reasons)))
