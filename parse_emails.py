@@ -250,18 +250,7 @@ def format_counter(counter):
                              key=lambda tpl: tpl[1],
                              reverse=True)])
 
-
-if __name__ == '__main__':
-    mbox_file = sys.argv[1]
-
-    print("Parsing {}".format(mbox_file))
-
-    time_records = []
-    p = multiprocessing.Pool()
-
-    with timed("Parallel extract", time_records):
-        results = list(map(parse_mail, mailbox.mbox(mbox_file)))
-
+def analyse_data(results):
     total = len(results)
     partial_data = 0
     no_data = 0
@@ -327,21 +316,48 @@ if __name__ == '__main__':
         else:
             fault_times[result['cluster']].append(result['date'])
 
+    return {'count': total,
+            'partial_data': partial_data,
+            'no_data': no_data,
+            'missing_data': missing_data,
+            'disk_status': disk_status,
+            'cluster_status': cluster_status,
+            'dates': dates,
+            'syslog_windows': syslog_windows,
+            'failure_reasons': failure_reasons,
+            'fault_times': fault_times,
+    }
+
+if __name__ == '__main__':
+    mbox_file = sys.argv[1]
+
+    print("Parsing {}".format(mbox_file))
+
+    time_records = []
+    p = multiprocessing.Pool()
+
+    with timed("Parallel extract", time_records):
+        results = list(map(parse_mail, mailbox.mbox(mbox_file)))
+
+
+    analysis = analyse_data(results)
+
 
     print(("Read {} emails, of which {} had a complete data set, {}"
            " contained no data, and {} had partial data. Execution took"
            " {:06.4f}s.")
-          .format(total, total - partial_data - no_data, no_data, partial_data,
+          .format(analysis['total'], analysis['total'] - analysis['partial_data'] - analysis['no_data'],
+                  analysis['no_data'], analysis['partial_data'],
                   time_records[0]))
 
     print("The following data was missing: {}."
-          .format(format_counter(missing_data)))
-    print("Saw {} disk failures:".format(sum(disk_status.values())))
-    print("Disk statuses were: {}".format(format_counter(disk_status)))
-    print("Failures per cluster were: {}".format(format_counter(cluster_status)))
-    print("Date range was {}--{}".format(min(dates), max(dates)))
+          .format(format_counter(analysis['missing_data'])))
+    print("Saw {} disk failures:".format(sum(analysis['disk_status'].values())))
+    print("Disk statuses were: {}".format(format_counter(analysis['disk_status'])))
+    print("Failures per cluster were: {}".format(format_counter(analysis['cluster_status'])))
+    print("Date range was {}--{}".format(min(analysis['dates']), max(analysis['dates'])))
     print("Syslog windows were in the range {}--{}".format(
-        min([x for x in syslog_windows if x > datetime.timedelta(0)]),
-        max(syslog_windows)))
+        min([x for x in analysis['syslog_windows'] if x > datetime.timedelta(0)]),
+        max(analysis['syslog_windows'])))
     print("Observed failure reasons (from context) were: {}"
-          .format(format_counter(failure_reasons)))
+          .format(format_counter(analysis['failure_reasons'])))
