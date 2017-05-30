@@ -29,15 +29,13 @@ def delete_keys():
 def get_smart_data():
     upload_keys()
 
-
-        #filer_command = 'system node run -node * \'priv set diag; disk shm_stats asup\''
-    filer_command = 'system node run -node \\* "priv set diag; disk shm_stats asup"'
+    filer_command = 'system node run -node * "priv set diag; disk shm_stats asup"'
     for cluster_name in clusters:
         try:
             with settings(warn_only=True,
                           abort_exception=FabricException):
                 data = run(('ssh -o PreferredAuthentications=publickey'
-                            ' -i {}/id_rsa astjerna@{}-cluster-mgmt {}')
+                            ' -i {}/id_rsa astjerna@{}-cluster-mgmt \'{}\'')
                            .format(ssh_keys_dir, cluster_name, filer_command))
                 filename = "{}.{}.data.gz".format(cluster_name, time.time())
                 with gzip.open(filename, mode="wb") as f:
