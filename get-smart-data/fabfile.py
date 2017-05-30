@@ -1,12 +1,15 @@
 import time
 import uuid
 import gzip
+import os
 
 from fabric.api import run, env, put, settings
 
 env.hosts = ['db-manager']
-clusters = ['dbnast']
 env.user = "astjerna"
+env.password = os.environ['SSH_PASSWORD']
+clusters = ['dbnast']
+
 ssh_keys_dir = "~/astjerna-ssh-keys-{}".format(str(uuid.uuid4()))
 
 
