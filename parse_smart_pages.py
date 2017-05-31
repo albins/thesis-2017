@@ -76,6 +76,11 @@ def read_page_blocks(block):
 
 
 def read_disk_overview(lines):
+    """
+    Disk overview is one row per disk, featuring:
+                            Serial                 Disk   Average   Max    Retry  Timeout  Sense Data
+    Disk                    Number                 State   I/O      I/O    count  count    1       2      3     4     5     9   B
+    """
     disk_overview = list()
     count = 0
     for line_index, line in enumerate(lines):
@@ -91,7 +96,8 @@ def read_disk_overview(lines):
             break
         else:
             # The final "column" is junk:
-            disk_cells = regex.split("\s+", line)[:-1]
+            disk_strs = regex.split("\s+", line)[:-1]
+            disk_cells = disk_strs[:3] + [int(x) for x in disk_strs[3:]]
             disk_overview.append(disk_cells)
 
     return line_index, disk_overview
