@@ -1,47 +1,26 @@
 import time
-import uuid
 import gzip
-import os
+import os.path
 
-from fabric.api import run, env, put, settings
+from fabric.api import run, env, parallel
 
-env.hosts = ['db-manager']
+clusters = ['dbnast', 'dbnasr']
+env.hosts = ["{}-cluster-mgmt".format(c) for c in clusters]
 env.user = "astjerna"
-env.password = os.environ['SSH_PASSWORD']
-clusters = ['dbnast']
-
-ssh_keys_dir = "~/astjerna-ssh-keys-{}".format(str(uuid.uuid4()))
+env.key_filename = "id_rsa"
+data_store_dir = ""
 
 
-class FabricException(Exception):
-    pass
+def on_cluster(node_exp, command):
+    return 'system node run -node {} "{}"'.format(node_exp, command)
 
 
-def upload_keys():
-    run('mkdir -p {}'.format(ssh_keys_dir))
-    run('chmod 700 {}'.format(ssh_keys_dir))
-    put('id_rsa.pub', ssh_keys_dir)
-    put('id_rsa', ssh_keys_dir)
-    run('chmod 600 {}/id_rsa*'.format(ssh_keys_dir))
-
-
-def delete_keys():
-    run('rm -rf {}'.format(ssh_keys_dir))
-
-
+@parallel
 def get_smart_data():
-    upload_keys()
-
-    filer_command = 'system node run -node * "priv set diag; disk shm_stats asup"'
-    for cluster_name in clusters:
-        try:
-            with settings(warn_only=True,
-                          abort_exception=FabricException):
-                data = run(('ssh -o PreferredAuthentications=publickey'
-                            ' -i {}/id_rsa astjerna@{}-cluster-mgmt \'{}\'')
-                           .format(ssh_keys_dir, cluster_name, filer_command))
-                filename = "{}.{}.data.gz".format(cluster_name, time.time())
-                with gzip.open(filename, mode="wb") as f:
-                    f.write(str(data))
-        finally:
-            delete_keys()
+    filer_command = on_cluster(node_exp="*",
+                               command="priv set diag; disk shm_stats asup")
+    data = run(filer_command, shell=False)
+    filename = os.path.join(data_store_dir,
+                            "{}.{}.data.gz".format(env.host, time.time()))
+    with gzip.open(filename, mode="wb") as f:
+        f.write(str(data))
