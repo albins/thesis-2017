@@ -135,14 +135,14 @@ def read_registry(txt_fn):
 
         return completed_statements
 
+
 def parse_syslog_msg(msg):
     match = syslog_re.match(msg)
     date_parsed = dateutil.parser.parse(match.group('date'))
     result = {'original': msg,
               'facility': match.group('facility'),
               'log_level': match.group('log_level'),
-              'date': date_parsed,
-    }
+              'date': date_parsed}
     return result
 
 
@@ -250,19 +250,19 @@ def format_counter(counter):
                              key=lambda tpl: tpl[1],
                              reverse=True)])
 
+
 def analyse_data(results):
     total = len(results)
     partial_data = 0
     no_data = 0
     missing_data = Counter()
-    disk_status = Counter()
-    cluster_status = Counter()
     dates = []
     syslog_windows = []
     failure_reasons = Counter()
-    fault_times = defaultdict(list)
+    fails_per_disk = defaultdict(lambda: defaultdict(set))
 
     for result in results:
+        cluster = result['cluster']
         dates.append(result['date'])
         if not result['parts_data']:
             no_data += 1
@@ -289,34 +289,35 @@ def analyse_data(results):
             delta = last_log_entry - first_log_entry
             syslog_windows.append(delta)
 
-        num_failed_disks = 0
-        registry_failed_dates = []
         for disk in part_data['registry']:
-            if disk['device'] == "NotPresent":
+            device = disk['device']
+            if device == "NotPresent":
                 continue
 
-            num_failed_disks += 1
-            registry_failed_dates.append(disk['timefailed'])
-
-            shelf = disk_re.match(disk['device']).group('shelf')
-            bay = disk_re.match(disk['device']).group('bay')
+            shelf = disk_re.match(device).group('shelf')
+            bay = disk_re.match(device).group('bay')
 
             if not shelf:
-                device_name = "{}:{}".format(result['cluster'], bay)
+                device_name = bay
             else:
-                device_name = "{}:{}.{}".format(result['cluster'], shelf, bay)
-            disk_status[device_name] += 1
-            cluster_status[result['cluster']] += 1
+                device_name = "{}.{}".format(shelf, bay)
 
-        if part_data['context'] and len(registry_failed_dates) <= 1:
-            context_fault_date = part_data['context']['time']
-            fault_times[result['cluster']].append(context_fault_date)
-        elif registry_failed_dates:
-            fault_times[result['cluster']] += registry_failed_dates
-        else:
-            fault_times[result['cluster']].append(result['date'])
+            fails_per_disk[cluster][device_name].add(disk['timefailed'])
 
-    return {'count': total,
+    fault_times = []
+    disk_status = Counter()
+    cluster_status = Counter()
+    for cluster_name, disk_statuses in fails_per_disk.items():
+        flat_times = sum([list(time_set)
+                            for time_set in disk_statuses.values()], [])
+        fault_times += flat_times
+        cluster_status[cluster_name] += len(flat_times)
+
+        for disk_name, disk_fail_times in disk_statuses.items():
+            num_fails = len(disk_fail_times)
+            disk_status["{}.{}".format(cluster_name, disk_name)] += num_fails
+
+    return {'total': total,
             'partial_data': partial_data,
             'no_data': no_data,
             'missing_data': missing_data,
@@ -325,6 +326,7 @@ def analyse_data(results):
             'dates': dates,
             'syslog_windows': syslog_windows,
             'failure_reasons': failure_reasons,
+            'fails_per_disk': fails_per_disk,
             'fault_times': fault_times,
     }
 
@@ -339,9 +341,7 @@ if __name__ == '__main__':
     with timed("Parallel extract", time_records):
         results = list(map(parse_mail, mailbox.mbox(mbox_file)))
 
-
     analysis = analyse_data(results)
-
 
     print(("Read {} emails, of which {} had a complete data set, {}"
            " contained no data, and {} had partial data. Execution took"

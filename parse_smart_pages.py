@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
-from parse_emails import format_counter
+from parse_emails import format_counter, timed
 
 import sys
 import regex
 from collections import defaultdict, Counter
 import gzip as gz
+import logging
+import os
+import datetime
+from itertools import zip_longest
+import multiprocessing
+
+log = logging.getLogger()
+ch = logging.StreamHandler(sys.stderr)
+formatter = logging.Formatter('%(name)s %(levelname)s: %(message)s')
+ch.setFormatter(formatter)
+log.addHandler(ch)
+log.setLevel(logging.INFO)
 
 disk_re = regex.compile("^Disk\s+0a.(?P<disk>.*):")
 row_re = regex.compile(r".*:\s+(0x([0-9a-f]{2})+\s*)+")
@@ -49,15 +61,40 @@ def read_table_row(row):
         return numbers
 
 
-def read_page_blocks(block):
+def seek_to(lines, re, offset_hint=0):
+    offset = offset_hint
+    for offset, line in enumerate(lines[offset:], start=offset_hint):
+        match = re.match(line)
+        if match:
+            log.debug("Found a match for {} at offset {}".format(re, offset))
+            return offset, match
+
+    raise IndexError("Could not find any match for {} after line {}"
+                     .format(re, offset_hint))
+
+
+def read_smart_pages(lines, offset_hint=0):
     disks = {}
-    disk = None
     current_table = []
 
-    for b_line in f:
-        line = b_line.decode("ascii")
+    # Seek to "Disk SMART Pages"
+    # skip --- line
+    offset, _match = seek_to(lines, re=regex.compile(r".*Disk SMART Pages.*",
+                                                     offset_hint=offset_hint))
+    offset += 1
+    assert regex.match(r'^-+', lines[offset])
+    offset, disk_match = seek_to(lines, re=disk_re, offset_hint=offset)
+    return offset, disks
+
+    disk = disk_match.group('disk')
+    offset += 1
+
+    for i, line in enumerate(lines[offset:], start=offset):
         if not line.strip():
-            continue
+            if not lines[i+1].strip():
+                # Two successive blank lines: end of data
+                break
+
         maybe_disk = disk_re.match(line)
 
         if maybe_disk:
@@ -72,7 +109,7 @@ def read_page_blocks(block):
         if row:
             current_table.append(row)
     disks[disk] = current_table
-    return disks
+    return offset, disks
 
 
 def read_disk_overview(lines):
@@ -82,13 +119,8 @@ def read_disk_overview(lines):
     Disk                    Number                 State   I/O      I/O    count  count    1       2      3     4     5     9   B
     """
     disk_overview = list()
-    count = 0
-    for line_index, line in enumerate(lines):
-        if regex.match('^-+', line):
-            # We've found the table!
-            break
-        else:
-            count += 1
+    line_index, _match = seek_to(lines, re=regex.compile('^-+'))
+    line_index += 1
 
     for line_index, line in enumerate(lines[line_index:], start=line_index):
         if not line.strip():
@@ -103,9 +135,57 @@ def read_disk_overview(lines):
     return line_index, disk_overview
 
 
+def identify_headings(lines):
+    headings = defaultdict(list)
+
+    for i, line in enumerate(lines):
+        if regex.match(r'^-+\s*$', line) and \
+           (i+1 >= len(lines) or not lines[i + 1].strip()):
+            headings[lines[i-1].strip()].append(i-1)
+        elif line.strip() and not regex.match(r'.*\d.*', line) and \
+             not regex.match(r'^-+\s*$', line):
+            headings[line.strip()].append(i)
+
+    return headings
+
+
+def read_sense_error(lines, offset_hint=0):
+    start_offset = offset_hint
+    data = list()
+
+    start_offset, _match = seek_to(lines,
+                                   re=regex.compile('Disk LOG Sense Error.*'),
+                                   offset_hint=offset_hint)
+    start_offset += 2
+
+    # Accumulate data
+    for i, line in enumerate(lines[start_offset:], start=start_offset):
+        if not line.strip():
+            # Empty line -- terminator
+            break
+        else:
+            data.append(line)
+
+    return i, data
+
+
 def extract_node_data(lines):
     node_data = dict()
-    offset_hint, node_data["disk_overview"] = read_disk_overview(lines)
+    offset, node_data["disk_overview"] = read_disk_overview(lines)
+    node_data['headings'] = identify_headings(lines)
+    try:
+        _, node_data["sense_error"] = read_sense_error(lines,
+                                                       offset_hint=offset)
+
+    except IndexError:
+        log.warning("No sense data found!")
+
+    try:
+        _, node_data["smart_pages"] = read_smart_pages(lines,
+                                                       offset_hint=offset)
+    except IndexError:
+        log.warning("No SMART pages found!")
+
     return node_data
 
 
@@ -118,6 +198,8 @@ def read_cluster_data_snapshot(filename):
             line = b_line.decode(FILE_CODEC)
             maybe_match = node_re.match(line)
             if maybe_match:
+                log.debug("Found a new node {}".
+                          format(maybe_match.group('node_name')))
                 current_node = maybe_match.group('node_name')
             elif current_node:
                 cluster_data[current_node].append(line)
@@ -129,35 +211,155 @@ def read_cluster_data_snapshot(filename):
             raise ValueError("Did not find a single node declaration!")
 
     for k, value in cluster_data.items():
+        log.debug("Processing data for node {}".format(k))
         cluster_data[k] = extract_node_data(value)
 
     return cluster_data
 
 
-if __name__ == '__main__':
-    filenames = sys.argv[1:]
+def index_files(path):
+    """
+    Returns a dictionary on the format node name -> [(capture date, file
+    name w/full path)]
+    """
+
+    filenames = defaultdict(list)
+    file_re = regex.compile("db(?<node_name>.*?)"
+                            "-cluster-mgmt\.(?<timestamp>.*?)\.data\.gz$")
+
+    for subdir, _dirs, files in os.walk(path):
+        for file in files:
+            match = file_re.match(file)
+            if not match:
+                continue
+            else:
+                node = match.group('node_name')
+                timestamp = datetime.datetime.fromtimestamp(
+                    float(match.group('timestamp')))
+                full_path = os.path.join(subdir, file)
+                filenames[node].append((timestamp, full_path))
+    return {k: sorted(v) for k, v in filenames.items()}
+
+
+def process_data_file(ts, file_name):
+    log.debug("Processing {}".format(file_name))
+    return ts, read_cluster_data_snapshot(file_name)
+
+
+def grouper(iterable, n, fillvalue=None):
+    "Collect data into fixed-length chunks or blocks"
+    # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
+    args = [iter(iterable)] * n
+    return zip_longest(*args, fillvalue=fillvalue)
+
+
+def ungroup(iterable):
+    return sum(iterable, [])
+
+
+def load_data_chunk(chunk):
+    """
+    Process a piece of data on the format
+    [(date captured, file_name)], returning
+    [(date caputured, parsed data)].
+    """
+    with timed(task_name="Load data chunk"):
+        return [process_data_file(*ts_f) for ts_f in chunk if ts_f]
+
+
+def parse_files(directory_name):
+    files = index_files(directory_name)
+    p = multiprocessing.Pool()
 
     all_data = {}
-    skip_count = 0
-    disk_count = Counter()
-    node_count = Counter()
+    work_chunk_size = 400
 
-    for filename in filenames:
-        cluster_name = regex.match(".*?db(.*)-cluster.*", filename).group(1)
-        if cluster_name not in all_data:
-            all_data[cluster_name] = read_cluster_data_snapshot(filename)
-        else:
-            skip_count += 1
+    for cluster_name, ts_and_filenames in files.items():
+        work_chunks = grouper(ts_and_filenames[:2], work_chunk_size)
+        all_data[cluster_name] = ungroup(p.map(load_data_chunk, work_chunks))
 
-    for cluster, data in all_data.items():
-        disk_count[cluster] += sum([len(node['disk_overview'])
-                                    for node in data.values()])
-        node_count[cluster] += len(data)
+    return all_data
 
-    print("Disk drives: {} disk drives ({} in total)"
-          .format(format_counter(disk_count),
-                  sum(disk_count.values())))
-    print("Nodes: {} ({} in total)."
-          .format(format_counter(node_count),
-                  sum(node_count.values())))
-    print("Analysed {} clusters".format(len(all_data.keys())))
+
+def analyse_data(cluster, ts_and_data):
+    """
+    - disk_count: number of disk
+    - node_count: number of nodes
+    - headings: distinct headings seen
+    - overview_values[disk] => [(timestamp, row_value_snapshot)]
+    - smart_mystery[disk]   => [(timestamp, matrix_value_snapshot)]
+    """
+    log.info("Analysing timeseries data for {}".format(cluster))
+
+    disk_count = None
+    node_count = None
+    headings = set()
+    overview_values = []
+    smart_mystery = []
+
+    for ts, node_data in ts_and_data:
+        data_point_disk_count = sum([len(node['disk_overview'])
+                                     for node in node_data.values()])
+        data_point_node_count = len(node_data.keys())
+
+        if disk_count != data_point_disk_count:
+            if disk_count:
+                log.warning("Updating disk count from {} to {}"
+                            .format(disk_count, data_point_disk_count))
+            disk_count = data_point_disk_count
+
+        if node_count != data_point_node_count:
+            if node_count:
+                log.warning("Updating node count from {} to {}"
+                            .format(node_count, data_point_node_count))
+            node_count = data_point_node_count
+
+    return {
+        'disk_count': disk_count,
+        'node_count': node_count,
+        'headings': headings,
+        'overview_values': overview_values,
+        'smart_mystery': smart_mystery
+    }
+
+
+if __name__ == '__main__':
+    with timed(task_name="Parse everything"):
+        data = parse_files(sys.argv[1])
+        #print(list(data.values())[0])
+
+    with timed(task_name="Data analysis"):
+        analysed_data = {c: analyse_data(c, ts_data)
+                         for c, ts_data in data.items()}
+
+    disk_count = sum([d['disk_count'] for d in analysed_data.values()])
+    log.info("Saw {} disks".format(disk_count))
+
+
+    # for cluster, data in all_data.items():
+    #     disk_count[cluster] +=
+    #     node_count[cluster] += len(data)
+    #     for node in data.values():
+    #         headings = headings.union(set(node['headings']))
+    #         for disk_data in node['disk_overview']:
+    #             name = ".".join(disk_data[0].split(".")[1:])
+    #             disk_names[name] += 1
+
+    # print("Disk drives: {} disk drives ({} in total)"
+    #       .format(format_counter(disk_count),
+    #               sum(disk_count.values())))
+    # print("Nodes: {} ({} in total)."
+    #       .format(format_counter(node_count),
+    #               sum(node_count.values())))
+    # print("Analysed {} clusters".format(len(all_data.keys())))
+    # print("Saw the following headings: {}".format(", ".join(list(headings))))
+
+    # disk_locations = set()
+    # most_popular_count = disk_names[min(disk_names)]
+    # for disk, count in disk_names.items():
+    #     if count == most_popular_count:
+    #         shelf, bay = [int(x) for x in disk.split(".")]
+    #         disk_locations.add((shelf, bay))
+
+    #print("These were the given disk names: {}".format(format_counter(disk_names)))
+    #print("The most common locations: {}".format(sorted(list(disk_locations))))
