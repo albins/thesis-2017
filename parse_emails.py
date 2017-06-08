@@ -43,11 +43,11 @@ def read_xml_string(element, *element_hierarchy):
 
 
 @contextmanager
-def timed(task_name, time_record=[]):
+def timed(task_name, time_record=[], printer=log.info):
     start_time = time.clock()
     yield
     end_time = time.clock()
-    log.info("Task {} ran in {:06.4f}s"
+    printer("Task {} ran in {:06.4f}s"
              .format(task_name, end_time - start_time))
     time_record.append(end_time - start_time)
 
