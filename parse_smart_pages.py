@@ -18,34 +18,11 @@ ch.setFormatter(formatter)
 log.addHandler(ch)
 log.setLevel(logging.INFO)
 
-disk_re = regex.compile("^Disk\s+0a.(?P<disk>.*):")
+disk_re = regex.compile("^Disk\s+.*?\.(?P<disk>\d+.\d+):?")
 row_re = regex.compile(r".*:\s+(0x([0-9a-f]{2})+\s*)+")
 node_re = regex.compile(r"^Node: db(?P<node_name>.+\d+)\s*")
 
 FILE_CODEC = 'ascii'
-
-
-    # diff_matrix = defaultdict(Counter)
-
-    # with gz.open(filename, 'r') as f:
-    #     results = read_page_blocks(f)
-    #     for disk, matrix in results.items():
-    #         for row_no, row in enumerate(matrix):
-    #             for col_no, cell in enumerate(row):
-    #                 diff_matrix[(row_no, col_no)][cell] += 1
-
-    # for (row, col), count in diff_matrix.items():
-    #     if len(count) > 1:
-    #         profile = format_counter(count)
-    #     else:
-    #         value = list(count.keys())[0]
-    #         if value != 0:
-    #             profile = "Const {}".format(value)
-    #         else:
-    #             profile = None
-
-    #     if profile:
-    #         print("{},{}: {}".format(row, col, profile))
 
 
 def read_table_row(row):
@@ -61,14 +38,18 @@ def read_table_row(row):
         return numbers
 
 
-def seek_to(lines, re, offset_hint=0):
+def seek_to(lines, re, offset_hint=0, max_search=None):
     offset = offset_hint
     for offset, line in enumerate(lines[offset:], start=offset_hint):
         match = re.match(line)
         if match:
             log.debug("Found a match for {} at offset {}".format(re, offset))
             return offset, match
+        elif max_search and (offset - offset_hint) >= max_search:
+            log.warning("Gave up after {} lines".format(max_search))
+            break
 
+    log.debug("Could not find a match for {} at offset {}".format(re, offset))
     raise IndexError("Could not find any match for {} after line {}"
                      .format(re, offset_hint))
 
@@ -81,10 +62,7 @@ def read_smart_pages(lines, offset_hint=0):
     # skip --- line
     offset, _match = seek_to(lines, re=regex.compile(r".*Disk SMART Pages.*",
                                                      offset_hint=offset_hint))
-    offset += 1
-    assert regex.match(r'^-+', lines[offset])
-    offset, disk_match = seek_to(lines, re=disk_re, offset_hint=offset)
-    return offset, disks
+    offset, disk_match = seek_to(lines, re=disk_re, offset_hint=offset, max_search=5)
 
     disk = disk_match.group('disk')
     offset += 1
@@ -139,7 +117,7 @@ def identify_headings(lines):
     headings = defaultdict(list)
 
     for i, line in enumerate(lines):
-        if regex.match(r'^-+\s*$', line) and \
+        if regex.match(r'^(-+\s*)+$', line) and \
            (i+1 >= len(lines) or not lines[i + 1].strip()):
             headings[lines[i-1].strip()].append(i-1)
         elif line.strip() and not regex.match(r'.*\d.*', line) and \
@@ -169,27 +147,91 @@ def read_sense_error(lines, offset_hint=0):
     return i, data
 
 
+def read_smart_data(lines, offset_hint=0):
+    """
+    Returns disk_label => {disk_label => {SMART_id => (status, value, worst value, raw value)}}
+    """
+    data = defaultdict(dict)
+    offset, _match = seek_to(lines, re=regex.compile(r".*Disk SMART Pages.*",
+                                                     offset_hint=offset_hint))
+    offset, disk_match = seek_to(lines, re=disk_re, offset_hint=offset, max_search=3)
+    disk = disk_match.group('disk')
+    offset += 1
+    line_re = regex.compile("^\s+(.*?)h\s+(.*?)h\s+(\d+)\s+(\d+)\s+(.*?)h\s+.*")
+
+    for i, line in enumerate(lines[offset:], start=offset):
+        if not line.strip():
+            if not lines[i+1].strip():
+                # Two blank lines -- new data segment
+                break
+            else:
+                continue
+
+        maybe_disk = disk_re.match(line)
+
+        if maybe_disk:
+            disk = maybe_disk.group('disk')
+            log.debug("Found new disk: {}!".format(disk))
+            continue
+        elif regex.match(r".*Attribute ID.*", line):
+            continue
+        elif regex.match(r"^---+.*", line):
+            continue
+        else:
+            line_data = line_re.match(line)
+            if not line_data:
+                log.error("Line '{}' does not match!".format(line.strip()))
+                raise IndexError
+            attr_idH, statusH, value, wrst_value, raw_valueH = line_data.groups()
+
+            data[disk][int(attr_idH, 16)] = (int(statusH, 16),
+                                             int(value), int(wrst_value),
+                                             int(raw_valueH, 16))
+    return i, data
+
+
 def extract_node_data(lines):
     node_data = dict()
     offset, node_data["disk_overview"] = read_disk_overview(lines)
     node_data['headings'] = identify_headings(lines)
-    try:
-        _, node_data["sense_error"] = read_sense_error(lines,
-                                                       offset_hint=offset)
+    node_data['smart_mystery'] = {}
+    node_data['smart_data'] = {}
+    # try:
+    #     _, node_data["sense_error"] = read_sense_error(lines,
+    #                                                    offset_hint=offset)
 
-    except IndexError:
-        log.warning("No sense data found!")
+    # except IndexError:
+    #     log.warning("No sense data found!")
 
     try:
-        _, node_data["smart_pages"] = read_smart_pages(lines,
-                                                       offset_hint=offset)
+        _, node_data["smart_mystery"] = read_smart_pages(lines,
+                                                         offset_hint=offset)
     except IndexError:
         log.warning("No SMART pages found!")
+
+    try:
+        _, node_data["smart_data"] = read_smart_data(lines, offset_hint=offset)
+    except IndexError:
+        log.warning("No non-obfuscated SMART data")
 
     return node_data
 
 
 def read_cluster_data_snapshot(filename):
+    """
+    Open a gzipped text data file and parse it.
+
+    Returns a dictionary on the format:
+    node_name =>
+      - disk_overview => [disk label, serial number,
+         disk state, average I/O, max I/O, retry count, timeout count,
+         sense data 1 ... sense data 9, sense data B]
+      - headings => { heading => [line number]}
+      - sense_error => {}
+      - smart_mystery => [matrix]
+      - smart_data => {disk_label => {SMART_id => (status, value, worst value, raw value)}}
+
+    """
     cluster_data = defaultdict(list)
     current_node = None
 
@@ -268,6 +310,13 @@ def load_data_chunk(chunk):
 
 
 def parse_files(directory_name):
+    """
+    Load a set of files named db<cluster name>-cluster-mgmt.<timestamp>.data.gz.
+
+    Returns:
+    all_data[cluster_name] => [(capture date, parsed data)]
+    """
+
     files = index_files(directory_name)
     p = multiprocessing.Pool()
 
@@ -275,19 +324,24 @@ def parse_files(directory_name):
     work_chunk_size = 400
 
     for cluster_name, ts_and_filenames in files.items():
-        work_chunks = grouper(ts_and_filenames[:2], work_chunk_size)
-        all_data[cluster_name] = ungroup(p.map(load_data_chunk, work_chunks))
+        work_chunks = grouper(ts_and_filenames[:200], work_chunk_size)
+        all_data[cluster_name] = ungroup(map(load_data_chunk, work_chunks))
 
     return all_data
 
 
 def analyse_data(cluster, ts_and_data):
     """
-    - disk_count: number of disk
+    - disk_count: number of disks
     - node_count: number of nodes
-    - headings: distinct headings seen
+    - headings: set of all distinct headings seen
     - overview_values[disk] => [(timestamp, row_value_snapshot)]
-    - smart_mystery[disk]   => [(timestamp, matrix_value_snapshot)]
+    - smart_data[disk] => [(timestamp, [attribute] => (status, value, worst value, raw value))]
+    - smart_mystery[disk]   => [(timestamp, matrix_snapshot)]
+    - disk_io_stats[disk] => [(timestamp, (CPIO blocks read, blocks read, written, verifies, MaxQ))]
+    - disk_errors[disk] => [(timestamp, [(cyl, head, sector)])]
+    - smart_mystery_diff[disk] => {(row, column) => {value => last timestamp seen}
+    - smart_data_diff[disk] => {attribute => {value => count}}
     """
     log.info("Analysing timeseries data for {}".format(cluster))
 
@@ -295,12 +349,16 @@ def analyse_data(cluster, ts_and_data):
     node_count = None
     headings = set()
     overview_values = []
-    smart_mystery = []
+    smart_mystery = defaultdict(list)
+    smart_data = defaultdict(list)
+    smart_mystery_diff = defaultdict(lambda: defaultdict(dict))
+    smart_data_diff = defaultdict(lambda: defaultdict(Counter))
 
-    for ts, node_data in ts_and_data:
+
+    for ts, cluster_data in ts_and_data:
         data_point_disk_count = sum([len(node['disk_overview'])
-                                     for node in node_data.values()])
-        data_point_node_count = len(node_data.keys())
+                                     for node in cluster_data.values()])
+        data_point_node_count = len(cluster_data.keys())
 
         if disk_count != data_point_disk_count:
             if disk_count:
@@ -313,13 +371,41 @@ def analyse_data(cluster, ts_and_data):
                 log.warning("Updating node count from {} to {}"
                             .format(node_count, data_point_node_count))
             node_count = data_point_node_count
+        for node_data in cluster_data.values():
+            for disk, smart_values in node_data['smart_data'].items():
+                assert isinstance(smart_values, dict)
+                smart_data[disk].append((ts, smart_values))
+
+            for disk, matrix in node_data['smart_mystery'].items():
+                if matrix:
+                    smart_mystery[disk].append((ts, matrix))
+
+            headings = headings.union(set(node_data['headings'].keys()))
+
+    for disk, tseries_data in smart_mystery.items():
+        for (ts, matrix) in tseries_data:
+            for row_no, row in enumerate(matrix):
+                for col_no, cell in enumerate(row):
+                    current_value = smart_mystery_diff[disk][(row_no, col_no)].get(cell,
+                                                                                   datetime.datetime.fromtimestamp(0))
+                    if ts > current_value:
+                        smart_mystery_diff[disk][(row_no, col_no)][cell] = ts
+
+    for disk, tss_and_data in smart_data.items():
+        for _ts, data in tss_and_data:
+            for smart_attr, value_set  in data.items():
+                _status, value, _worst_value, _raw_value = value_set
+                smart_data_diff[disk][smart_attr][value] += 1
 
     return {
         'disk_count': disk_count,
         'node_count': node_count,
         'headings': headings,
         'overview_values': overview_values,
-        'smart_mystery': smart_mystery
+        'smart_mystery': smart_mystery,
+        'smart_mystery_diff': smart_mystery_diff,
+        'smart_data_diff': smart_data_diff,
+        'smart_data': smart_data,
     }
 
 
@@ -335,31 +421,45 @@ if __name__ == '__main__':
     disk_count = sum([d['disk_count'] for d in analysed_data.values()])
     log.info("Saw {} disks".format(disk_count))
 
+    for cluster, cluster_data in analysed_data.items():
+        if cluster_data['smart_data']:
+            log.info("Cluster {} had smart data for {}/{} disks"
+                  .format(cluster, len(cluster_data['smart_data'].keys()),
+                          cluster_data['disk_count']))
+        if cluster_data['smart_mystery']:
+            log.info("Cluster {} had mystery smart data for {}/{} disks!"
+                     .format(cluster,
+                             len(cluster_data['smart_mystery'].keys()),
+                             cluster_data['disk_count']))
 
-    # for cluster, data in all_data.items():
-    #     disk_count[cluster] +=
-    #     node_count[cluster] += len(data)
-    #     for node in data.values():
-    #         headings = headings.union(set(node['headings']))
-    #         for disk_data in node['disk_overview']:
-    #             name = ".".join(disk_data[0].split(".")[1:])
-    #             disk_names[name] += 1
+        for disk, disk_data in cluster_data['smart_mystery_diff'].items():
+            print("Disk: {}".format(disk))
+            for ((row, col), count) in disk_data.items():
+                if len(count) > 1:
+                    profile = format_counter(count)
+                else:
+                    value = list(count.keys())[0]
+                    if value != 0:
+                        #profile = "Const {}".format(value)
+                        profile = None
+                    else:
+                        profile = None
 
-    # print("Disk drives: {} disk drives ({} in total)"
-    #       .format(format_counter(disk_count),
-    #               sum(disk_count.values())))
-    # print("Nodes: {} ({} in total)."
-    #       .format(format_counter(node_count),
-    #               sum(node_count.values())))
-    # print("Analysed {} clusters".format(len(all_data.keys())))
-    # print("Saw the following headings: {}".format(", ".join(list(headings))))
+                if profile:
+                    print("\t{},{}: {}".format(row, col, profile))
 
-    # disk_locations = set()
-    # most_popular_count = disk_names[min(disk_names)]
-    # for disk, count in disk_names.items():
-    #     if count == most_popular_count:
-    #         shelf, bay = [int(x) for x in disk.split(".")]
-    #         disk_locations.add((shelf, bay))
 
-    #print("These were the given disk names: {}".format(format_counter(disk_names)))
-    #print("The most common locations: {}".format(sorted(list(disk_locations))))
+        for disk, disk_data in cluster_data['smart_data_diff'].items():
+            for attribute, count in disk_data.items():
+                if len(count) > 1:
+                    profile = format_counter(count)
+                else:
+                    value = list(count.keys())[0]
+                    if value != 0:
+                        #profile = "Const {}".format(value)
+                        profile = None
+                    else:
+                        profile = None
+
+                if profile:
+                    print("SMART for {} {}: {}".format(disk, attribute, profile))
