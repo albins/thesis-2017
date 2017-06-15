@@ -35,7 +35,8 @@ FILE_CODEC = 'ascii'
 DATA_FILE_FIELDS = ["timestamp", "cluster", "disk", "serial",
                     "state", "average_io", "max_io", "retry_count",
                     "timeout_count",
-                    *["sense_data{n}".format(n=n) for n in range(1,10)],
+                    *["sense_data{n}".format(n=n) for n in range(1, 6)],
+                    "sense_data9",
                     "sense_dataB",
                     "smart_data",
                     "smart_mystery"]
@@ -661,15 +662,122 @@ def count_disks(data_file_path):
     return len(disks)
 
 
+def prepare_es_data(cluster, parsed_data):
+    """
+    Generate prepared ES data from pre-parsed data, as returned by
+    process_data_file().
+
+    To be fed into es_import()
+    """
+    timestamp, cluster_data = parsed_data
+
+    # Ignore node names
+    for node_data in cluster_data.values():
+        for disk_data in node_data['disk_overview']:
+            disk_location = ".".join(disk_data[0].split(".")[1:])
+            yield {
+                '_index' : as_es_index('netapp-lowlevel', timestamp),
+                '_type': "document",
+                '_source': {
+                    'cluster_name': cluster,
+                    'disk_location': disk_location,
+                    '@timestamp': timestamp,
+                    'smart': node_data['smart_data'].get(disk_location, None),
+                    'smart_mystery': node_data['smart_mystery'].get(
+                        disk_location, None),
+                    'serial': disk_data[1],
+                    'state': disk_data[2],
+                    'avg_io': disk_data[3],
+                    'max_io': disk_data[4],
+                    'retry_count': disk_data[5],
+                    'timeout_count': disk_data[6],
+                    'sense_data1': disk_data[7],
+                    'sense_data2': disk_data[8],
+                    'sense_data3': disk_data[9],
+                    'sense_data4': disk_data[10],
+                    'sense_data5': disk_data[11],
+                    'sense_data9': disk_data[12],
+                    'sense_dataB': disk_data[13],
+                }
+            }
+
+
+def as_es_index(prefix, datetime):
+    """
+    Generate a canonical ES index name from a datetime and a prefix.
+    """
+    return "{}-{:%Y-%m-%d}".format(prefix, datetime)
+
+
+def es_get_high_water_mark(es):
+    """
+    Get the high-water-mark timestamp per-cluster from ES.
+
+    Will return BEGINNING_OF_TIME if there was nothing.
+
+    cluster_name => last seen timestamp
+    """
+
+    # FIXME: implement this!
+    per_cluster = defaultdict(lambda: BEGINNING_OF_TIME)
+
+    return per_cluster
+
+
+def es_import(es, documents):
+    """
+    Take a generator of documents and index them.
+    """
+    # FIXME: implement this!
+    # use bulk_index(es...)
+    for document in documents:
+        print(document)
+
+
+def file_index_to_es_data(file_index, last_seen):
+    """
+    Generate entries to insert into es_import from a file index and
+    high-water-mark dictionary.
+    """
+
+    current_count = 0
+    number_of_files = sum([len(x) for x in file_index.values()])
+    skipped = Counter()
+
+    for cluster_name, ts_plus_filenames in file_index.items():
+        for ts, filename in ts_plus_filenames:
+            current_count += 1
+            if ts < last_seen[cluster_name]:
+                skipped[cluster_name] += 1
+                continue
+            log.info("Synced %s/%s files...", current_count, number_of_files)
+            for data_point in prepare_es_data(cluster_name,
+                                              process_data_file(ts, filename)):
+                yield data_point
+    log.info("Processed %s files. Skipped files: {}"
+             .format(current_count, format_counter(skipped)))
+
+
+def parse_into_es(file_index):
+    """
+    Intelligently take a file index dictionary and sync it with an ES
+    instance.
+    """
+    es = None # Set up elasticsearch
+    last_seen = es_get_high_water_mark(es)
+    es_import(es, file_index_to_es_data(file_index, last_seen))
+
+
 if __name__ == '__main__':
     tasks = sys.argv[1:]
 
     data_directory = sys.argv[1]
     data_file = "../Data/low_level.data.csv.gz"
 
-    if "incremental_csv" in tasks:
+    if "incremental_es" in tasks:
         file_index = index_files(data_directory)
-        parse_incrementally(file_index, data_file)
+        #parse_incrementally(file_index, data_file)
+        parse_into_es(file_index)
 
     if "disks" in tasks:
         print("Saw {} disks".format(count_disks(data_file)))
