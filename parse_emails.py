@@ -36,6 +36,33 @@ cluster_re = re.compile(".*?db(?P<cluster>.*?)\d+\s+\(.*")
 disk_re = re.compile("(?P<connector>[0-9][a-d])\.((?P<shelf>\d{1,2})\.)?(?P<bay>\d{1,2})")
 syslog_re = re.compile('(?P<some_code>([0-9]|[a-f])+\.([0-9]|[a-f])+\s([0-9]|[a-f])+)\s(?P<date>.*?)\s+\[(?P<facility>.*):(?P<log_level>.*)\] (?P<body>.*)')
 
+TEX_HISTOGRAM = """
+\\begin{{tikzpicture}}[font=\\tiny]
+  \\begin{{axis}}[
+      ybar,
+      width=\\linewidth,
+      bar width={bar_width},
+      xlabel={{{{{x_label}}}}},
+      ylabel={{{{{y_label}}}}},
+      ymin=0,
+      ytick=\\empty,
+      xtick=data,
+      axis x line=bottom,
+      axis y line=left,
+      enlarge x limits=0.1,
+      xticklabel style={{rotate=45}},
+      symbolic x coords={{{label_field}}},
+      xticklabel style={{anchor=base,xshift=-0.20cm, yshift=-0.20cm}},
+      nodes near coords={{\\pgfmathprintnumber\\pgfplotspointmeta}}
+      ]
+      \\addplot[fill=white]
+    coordinates {{
+    {coordinates}
+    }};
+  \\end{{axis}}
+\\end{{tikzpicture}}
+"""
+
 
 def read_xml_string(element, *element_hierarchy):
     target = "/".join(element_hierarchy)
@@ -252,6 +279,12 @@ def format_counter(counter):
 
 
 def analyse_data(results):
+    """
+    cluster_status[cluster] => count of failures
+    fails_per_month[year, month] => count of failures
+    """
+
+
     total = len(results)
     partial_data = 0
     no_data = 0
@@ -260,6 +293,7 @@ def analyse_data(results):
     syslog_windows = []
     failure_reasons = Counter()
     fails_per_disk = defaultdict(lambda: defaultdict(set))
+    fails_per_month = Counter()
 
     for result in results:
         cluster = result['cluster']
@@ -317,6 +351,10 @@ def analyse_data(results):
             num_fails = len(disk_fail_times)
             disk_status["{}.{}".format(cluster_name, disk_name)] += num_fails
 
+    for failure_time in fault_times:
+        fails_per_month[(failure_time.year,
+                         failure_time.month, failure_time.strftime("%b"))] += 1
+
     return {'total': total,
             'partial_data': partial_data,
             'no_data': no_data,
@@ -328,10 +366,47 @@ def analyse_data(results):
             'failure_reasons': failure_reasons,
             'fails_per_disk': fails_per_disk,
             'fault_times': fault_times,
+            'fails_per_month': fails_per_month,
     }
+
+
+def make_month_histogram(analysis, location):
+    target_file = os.path.join(location, "email_fails_per_month.tex")
+    tuples = [("{} {}".format(year, month), count) for (year, _month_ord, month), count
+              in sorted(analysis['fails_per_month'].items())]
+    with open(target_file, 'w') as f:
+        f.write(render_tex_histogram(tuples=tuples,
+                                     x_label="",
+                                     y_label="Number of failures",
+                                     bar_width="8pt"))
+
+def render_tex_histogram(tuples, x_label, y_label, bar_width):
+    lines = []
+    labels = []
+    for label, weight in tuples:
+        labels.append(label)
+        lines.append("({}, {})\n".format(label, weight))
+    return TEX_HISTOGRAM.format(label_field=",".join(labels),
+                                coordinates="".join(lines),
+                                x_label=x_label,
+                                y_label=y_label,
+                                bar_width=bar_width)
+
+
+def make_cluster_histogram(analysis, location):
+    target_file = os.path.join(location, "email_fails_per_cluster.tex")
+
+    with open(target_file, 'w') as f:
+        f.write(render_tex_histogram(
+            tuples=analysis['cluster_status'].most_common(),
+            x_label="Cluster",
+            y_label="Number of Disk Failures",
+            bar_width="20pt"))
+
 
 if __name__ == '__main__':
     mbox_file = sys.argv[1]
+    tasks = sys.argv[1:]
 
     print("Parsing {}".format(mbox_file))
 
@@ -361,3 +436,10 @@ if __name__ == '__main__':
         max(analysis['syslog_windows'])))
     print("Observed failure reasons (from context) were: {}"
           .format(format_counter(analysis['failure_reasons'])))
+
+    histogram_location = "../Report/Graphs/"
+
+    if "month_histograms" in tasks:
+        make_month_histogram(analysis, histogram_location)
+    if "cluster_histograms" in tasks:
+        make_cluster_histogram(analysis, histogram_location)

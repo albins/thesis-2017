@@ -2,5 +2,5 @@ NA_EV_DESC (.*@)?%{DATA:node_name}:%{DATA:event_type}:%{DATA:log_level}
 SYSLOGBASE2 (?:%{SYSLOGTIMESTAMP:timestamp}|%{TIMESTAMP_ISO8601:timestamp8601}) \[%{NA_EV_DESC}\]:
 SYSLOGLINE %{SYSLOGBASE2} %{GREEDYDATA:message}
 NA_SCRUB_STATUS (partner:)?/%{DATA:aggregate_name}/%{DATA:plex_name}/%{DATA:raid_group_name}:
-DISK_PATTERN (?<disk_connector>[0-9][a-d])\.(?<disk_shelf>\d{1,2})\.(?<disk_bay>\d{1,2})
+DISK_PATTERN (?<disk_connector>[0-9]+[a-d])\.(?<disk_shelf>\d{1,2})\.(?<disk_bay>\d{1,2})
 HOURS_MINUTES_SECONDS (%{NUMBER:hours:int}:)?%{NUMBER:minutes:int}:%{NUMBER:seconds:float}
