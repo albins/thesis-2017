@@ -27,7 +27,8 @@ def get_broken_block(message_body):
     if regex.match("^\s*Fixing bad parity.*", message_body):
         block_re = regex.compile(".*block #(?P<disk_block>\d+)\s+$")
     else:
-        block_re = regex.compile("^Fixing.*, disk block \(DBN\) (?P<disk_block>\d+),.*")
+        block_re = regex.compile(
+            "^Fixing.*, disk block \(DBN\) (?P<disk_block>\d+),.*")
 
     match = block_re.match(message_body)
     disk_block = None
@@ -43,7 +44,8 @@ def get_broken_block(message_body):
 
 def get_disk_location(data):
     """
-    Try getting the disk location the reasonable way, falling back to regex search.
+    Try getting the disk location the reasonable way, falling back to
+    regex search.
     """
     disk_re = regex.compile(r".*\b\d{1,2}[a-d]\.(?P<disk_location>\d{1,2}\.\d{1,2})(\b|P\d).*")
 
@@ -146,7 +148,8 @@ def print_bad_blocks_report(es):
 
 
 def print_broken_disks_report(es):
-    for cluster, broken_disks in cluster_broken_disks(get_broken_disks(es)).items():
+    clustered_data = cluster_broken_disks(get_broken_disks(es))
+    for cluster, broken_disks in clustered_data.items():
         for disk_name, first_broke in broken_disks.items():
             print("Cluster {}, disk {} first broke at {}"
                   .format(cluster, disk_name, first_broke))
@@ -156,7 +159,8 @@ def print_correlation_report(es):
     broken_disks = set()
     disks_with_bad_blocks = set()
 
-    for cluster, cluster_disks in cluster_broken_disks(get_broken_disks(es)).items():
+    broken_disk_data = cluster_broken_disks(get_broken_disks(es))
+    for cluster, cluster_disks in broken_disk_data.items():
         for disk_name in cluster_disks.keys():
             broken_disks.add((cluster, disk_name))
 
