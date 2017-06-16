@@ -2,7 +2,7 @@
 from parse_emails import format_counter
 
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 import regex
@@ -21,6 +21,7 @@ FAIL_REASONS = ["raid.config.filesystem.disk.failed",
                 "raid.fdr.reminder"]
 
 DISK_FAIL_Q = " OR ".join(["event_type: {}".format(e) for e in FAIL_REASONS])
+SCRUB_TIME_Q = "tags: Disk_Scrub_Complete AND scrub_seconds: *"
 
 
 def get_broken_block(message_body):
@@ -179,9 +180,58 @@ def print_correlation_report(es):
                   len(disks_with_bad_blocks - broken_disks)))
 
 
+def get_scrubbing_durations(es):
+    """
+    Return scrubbing durations, as a tuple:
+    (timestamp, cluster, disk, timedelta of scrubbing duration)
+    """
+
+    res = scan(es, index=ES_INDEX, q=SCRUB_TIME_Q,
+               _source=["body", "disk_location", "scrub_seconds", "@timestamp",
+                        "cluster_name"])
+
+    for r in res:
+        data = r['_source']
+        timestamp = dateparser.parse(data['@timestamp'])
+        disk = get_disk_location(data)
+        cluster = data['cluster_name']
+        try:
+            scrubbing_time = data['scrub_seconds']
+        except KeyError:
+            continue
+
+        yield (timestamp, cluster, disk, timedelta(seconds=scrubbing_time))
+
+
+def get_minmax_scrub_durations(scrub_durations):
+    min_so_far = timedelta(hours=100*24*365)  #  100 years
+    max_so_far = timedelta(seconds=0)
+
+    max_result = None
+    min_result = None
+
+    for timestamp, cluster, disk, delta in scrub_durations:
+        if delta > max_so_far:
+            max_result = (timestamp, cluster, disk, delta)
+            max_so_far = delta
+        if delta < min_so_far:
+            min_result = (timestamp, cluster, disk, delta)
+            min_so_far = delta
+
+    return min_result, max_result
+
+
+def print_scrubbing_report(es):
+    (_, _, _, min_delta), (_, _, _, max_delta) = get_minmax_scrub_durations(
+        get_scrubbing_durations(es))
+
+    print("Scrubbing durations were in the range of {} to {}."
+          .format(str(min_delta), str(max_delta)))
+
+
 if __name__ == '__main__':
     es = Elasticsearch([ELASTIC_ADDRESS])
-
-    print_bad_blocks_report(es)
-    print_broken_disks_report(es)
-    print_correlation_report(es)
+    #print_bad_blocks_report(es)
+    #print_broken_disks_report(es)
+    #print_correlation_report(es)
+    print_scrubbing_report(es)

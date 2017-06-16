@@ -8,9 +8,13 @@ import gzip as gz
 import logging
 import os
 import datetime
-from itertools import zip_longest
-import multiprocessing
 import csv
+import statistics
+
+import dateparser
+from elasticsearch import Elasticsearch
+from elasticsearch.helpers import scan, parallel_bulk
+import pytz
 
 log = logging.getLogger()
 ch = logging.StreamHandler(sys.stderr)
@@ -18,6 +22,9 @@ formatter = logging.Formatter('%(name)s %(levelname)s: %(message)s')
 ch.setFormatter(formatter)
 log.addHandler(ch)
 log.setLevel(logging.INFO)
+
+elastic_logger = logging.getLogger('elasticsearch')
+elastic_logger.setLevel(logging.WARNING)
 
 disk_re = regex.compile("^Disk\s+.*?\.(?P<disk>\d+.\d+):?")
 row_re = regex.compile(r".*:\s+(0x([0-9a-f]{2})+\s*)+")
@@ -30,7 +37,7 @@ smart_pages_heading_re = regex.compile(r".*Disk SMART Pages.*")
 file_re = regex.compile("db(?<node_name>.*?)"
                         "-cluster-mgmt\.(?<timestamp>.*?)\.data\.gz$")
 
-BEGINNING_OF_TIME = datetime.datetime.fromtimestamp(0)
+BEGINNING_OF_TIME = datetime.datetime.fromtimestamp(0, tz=pytz.utc)
 FILE_CODEC = 'ascii'
 DATA_FILE_FIELDS = ["timestamp", "cluster", "disk", "serial",
                     "state", "average_io", "max_io", "retry_count",
@@ -42,8 +49,12 @@ DATA_FILE_FIELDS = ["timestamp", "cluster", "disk", "serial",
                     "smart_mystery"]
 CSV_DELIMITER = ";"
 
-ELASTIC_ADDRESS = "http://db-51167.cern.ch:9200/"
-# v. 2.3.1
+# db-51167.cern.ch:9200
+ELASTIC_ADDRESS = "localhost"
+ES_INDEX_BASE = 'netapp-lowlevel'
+ES_INDEX = 'netapp-lowlevel-*'
+LOW_LEVEL_DATA_Q = '*'
+
 
 def end_pad(lst, target_length, pad_value):
     diff_len = target_length - len(lst)
@@ -136,10 +147,13 @@ def read_disk_overview(lines):
                 disk_cells = disk_strs[:3] + [int(x) for x in disk_strs[3:]]
             except ValueError as e:
                 log.error("Error processing line %d '%s': %s",
-                          line_index, line, str(e))
+                          line_index, line.strip(), str(e))
                 continue
-
-            disk_overview.append(disk_cells)
+            if len(disk_cells) == 14:
+                disk_overview.append(disk_cells)
+            else:
+                log.error("Invalid line %s generated from line %d: '%s'",
+                          str(disk_cells), line_index, line.strip())
 
     return line_index, disk_overview
 
@@ -305,6 +319,8 @@ def index_files(path):
     """
     Returns a dictionary on the format node name -> [(capture date, file
     name w/full path)], ordered by capture date.
+
+    Dates are timezone-aware, timestamps presumed to be UTC.
     """
 
     filenames = defaultdict(list)
@@ -317,14 +333,15 @@ def index_files(path):
             else:
                 node = match.group('node_name')
                 timestamp = datetime.datetime.fromtimestamp(
-                    float(match.group('timestamp')))
+                    float(match.group('timestamp')),
+                    pytz.utc)
                 full_path = os.path.join(subdir, file)
                 filenames[node].append((timestamp, full_path))
     return {k: sorted(v) for k, v in filenames.items()}
 
 
 def process_data_file(ts, file_name):
-    log.info("Processing {}".format(file_name))
+    log.debug("Processing {}".format(file_name))
     return ts, read_cluster_data_snapshot(file_name)
 
 
@@ -676,7 +693,7 @@ def prepare_es_data(cluster, parsed_data):
         for disk_data in node_data['disk_overview']:
             disk_location = ".".join(disk_data[0].split(".")[1:])
             yield {
-                '_index' : as_es_index('netapp-lowlevel', timestamp),
+                '_index': as_es_index(ES_INDEX_BASE, timestamp),
                 '_type': "document",
                 '_source': {
                     'cluster_name': cluster,
@@ -702,6 +719,20 @@ def prepare_es_data(cluster, parsed_data):
             }
 
 
+def es_get_data(es, index):
+    """
+    Generate a lightly parsed Elasticsearch data block for the low-level
+    data.
+
+    N.B. it is not ordered.
+    """
+    res = scan(es, index=index, q=LOW_LEVEL_DATA_Q)
+    for x in res:
+        data = x['_source']
+        data['@timestamp'] = dateparser.parse(data['@timestamp'])
+        yield data
+
+
 def as_es_index(prefix, datetime):
     """
     Generate a canonical ES index name from a datetime and a prefix.
@@ -709,7 +740,7 @@ def as_es_index(prefix, datetime):
     return "{}-{:%Y-%m-%d}".format(prefix, datetime)
 
 
-def es_get_high_water_mark(es):
+def es_get_high_water_mark(es, index):
     """
     Get the high-water-mark timestamp per-cluster from ES.
 
@@ -717,10 +748,34 @@ def es_get_high_water_mark(es):
 
     cluster_name => last seen timestamp
     """
-
-    # FIXME: implement this!
     per_cluster = defaultdict(lambda: BEGINNING_OF_TIME)
+    q = {"size": 0,
+         "aggs": {
+             "group_by_cluster": {
+                 "terms": {
+                     "size": 0,
+                     "field": "cluster_name",
+                     "order": {
+                         "max_time": "desc"
+                     }
+                 },
+                 "aggs": {
+                     "max_time": {
+                         "max": {
+                             "field": "@timestamp"
+                         }}}}}}
 
+    res = es.search(index=index, body=q)
+    try:
+        buckets = res['aggregations']['group_by_cluster']['buckets']
+    except KeyError:
+        # Database was empty
+        buckets = []
+
+    for bucket in buckets:
+        cluster = bucket['key']
+        timestamp = dateparser.parse(bucket['max_time']['value_as_string'])
+        per_cluster[cluster] = timestamp
     return per_cluster
 
 
@@ -728,10 +783,37 @@ def es_import(es, documents):
     """
     Take a generator of documents and index them.
     """
-    # FIXME: implement this!
-    # use bulk_index(es...)
-    for document in documents:
-        print(document)
+    for result in parallel_bulk(es, documents):
+        succeeded, description = result
+        if not succeeded:
+            log.error(description)
+        else:
+            log.debug(description)
+
+
+def file_index_to_triplets(file_index):
+    """
+    Return tuples of cluster name, timestamp, filename, from an index.
+    """
+    for cluster_name, ts_plus_filenames in file_index.items():
+        for ts, filename in ts_plus_filenames:
+            yield (cluster_name, ts, filename)
+
+
+def is_actual(cn_ts_fn, last_seen):
+    """
+    Takes a dictionary of last seen values for clusters and a stream of
+    cluster name, timestamp, file name, returns True if ts is strictly after
+    last_seen for that cluster, False otherwise.
+    """
+    cluster, ts, fn = cn_ts_fn
+    if ts <= last_seen[cluster]:
+        log.debug("Skipped {}".format(fn))
+        return False
+    else:
+        log.debug("Kept {} for {} because {} > {}"
+                  .format(fn, cluster, str(ts), str(last_seen[cluster])))
+        return True
 
 
 def file_index_to_es_data(file_index, last_seen):
@@ -739,60 +821,83 @@ def file_index_to_es_data(file_index, last_seen):
     Generate entries to insert into es_import from a file index and
     high-water-mark dictionary.
     """
+    cluster_ts_filenames = [triplet for
+                            triplet in file_index_to_triplets(file_index)
+                            if is_actual(triplet, last_seen)]
+    total_num_files = sum([len(x) for x in file_index.values()])
+    num_files_used = len(cluster_ts_filenames)
+    skipped_files = total_num_files - num_files_used
 
-    current_count = 0
-    number_of_files = sum([len(x) for x in file_index.values()])
-    skipped = Counter()
-
-    for cluster_name, ts_plus_filenames in file_index.items():
-        for ts, filename in ts_plus_filenames:
-            current_count += 1
-            if ts < last_seen[cluster_name]:
-                skipped[cluster_name] += 1
-                continue
-            log.info("Synced %s/%s files...", current_count, number_of_files)
-            for data_point in prepare_es_data(cluster_name,
-                                              process_data_file(ts, filename)):
-                yield data_point
-    log.info("Processed %s files. Skipped files: {}"
-             .format(current_count, format_counter(skipped)))
+    for i, (cluster, ts, filename) in enumerate(cluster_ts_filenames):
+        if i % 20 == 0:
+            log.info("Synced %d/%d files (%d skipped)...", i, num_files_used,
+                     skipped_files)
+        for data_point in prepare_es_data(cluster,
+                                          process_data_file(ts, filename)):
+            yield data_point
 
 
-def parse_into_es(file_index):
+def parse_into_es(es, file_index):
     """
     Intelligently take a file index dictionary and sync it with an ES
     instance.
     """
-    es = None # Set up elasticsearch
-    last_seen = es_get_high_water_mark(es)
+    last_seen = es_get_high_water_mark(es, index=ES_INDEX)
+    log.info("Using high-water mark: {}".format(
+        ", ".join(["{}: {}".format(c, str(v)) for c, v in last_seen.items()])))
+
     es_import(es, file_index_to_es_data(file_index, last_seen))
+
+
+def runtime_statistics(runtimes):
+    return {'median': statistics.median(runtimes),
+            'mean': statistics.mean(runtimes),
+            'max': max(runtimes),
+            'min': min(runtimes),
+            'std.dev.': statistics.pstdev(runtimes),
+    }
+
+
+def profile_parser(data_directory):
+    NUM_FILES = 20
+    cluster_ts_filenames = list(file_index_to_triplets(
+        index_files(data_directory)))[:NUM_FILES]
+
+    runtimes = []
+    logging.getLogger('parse_emails').setLevel(logging.WARNING)
+    for _ in range(0, 10):
+        with timed("Parse {} items of raw data"
+                   .format(len(cluster_ts_filenames)),
+                   time_record=runtimes):
+            for _, ts, filename in cluster_ts_filenames:
+                # Force realisation of generator:
+                list(process_data_file(ts, filename))
+    print(runtime_statistics(runtimes))
 
 
 if __name__ == '__main__':
     tasks = sys.argv[1:]
-
     data_directory = sys.argv[1]
-    data_file = "../Data/low_level.data.csv.gz"
+    es = Elasticsearch([ELASTIC_ADDRESS])
 
     if "incremental_es" in tasks:
-        file_index = index_files(data_directory)
-        #parse_incrementally(file_index, data_file)
-        parse_into_es(file_index)
+        parse_into_es(es, index_files(data_directory))
 
     if "disks" in tasks:
-        print("Saw {} disks".format(count_disks(data_file)))
+        print("Saw {} disks".format(count_disks(es)))
     if "smart_stats" in tasks:
         smart_total, mystery_total = 0, 0
-        for cluster_counts in smart_counts_per_cluster(data_file).values():
+        for cluster_counts in smart_counts_per_cluster(es).values():
             smart, mystery = cluster_counts
             smart_total += smart
             mystery_total += mystery
 
         print("{}/{} disks had mystery SMART data, {} had normal SMART data"
-              .format(mystery_total, count_disks(data_file), smart_total))
+              .format(mystery_total, count_disks(es), smart_total))
     if "smart_changes" in tasks:
         pass
     if "mystery_changes" in tasks:
         pass
-    if "headings" in tasks:
-        pass
+
+    if "profile_parse" in tasks:
+        profile_parser(data_directory)
