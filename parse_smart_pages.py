@@ -56,6 +56,47 @@ ES_INDEX = 'netapp-lowlevel-*'
 LOW_LEVEL_DATA_Q = '*'
 
 
+def count_disks(es):
+    body = {
+        "size": 0,
+        "aggs": {
+            "group_by_cluster": {
+                "terms": {"size": 0,
+                          "field": "cluster_name"
+                },
+                "aggs": {
+                    "count_distinct_disks": {
+                        "cardinality": {
+                                  "field": "disk_location"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    res = es.search(index=ES_INDEX, body=body)
+    buckets = get_buckets(res, aggregation_name="group_by_cluster")
+    cluster_count = {}
+
+    for cluster_bucket in buckets:
+        cluster = cluster_bucket['key']
+        count = cluster_bucket['count_distinct_disks']['value']
+        cluster_count[cluster] = count
+
+    return sum(cluster_count.values())
+
+
+def get_buckets(res, aggregation_name):
+    """
+    Unpack a list of buckets from an elasticsearch result.
+    """
+
+    try:
+        return res['aggregations'][aggregation_name]['buckets']
+    except KeyError:
+        return []
+
+
 def end_pad(lst, target_length, pad_value):
     diff_len = target_length - len(lst)
     assert diff_len >= 0
@@ -670,15 +711,6 @@ def parse_incrementally(file_index, data_file):
             filewriter.writerow(row)
 
 
-def count_disks(data_file_path):
-    disks = set()
-    log.debug("Reading disks from {}".format(data_file_path))
-    for row in take_duration(read_data_file(data_file_path), minutes=30):
-        disks.add((row['cluster'], row['disk']))
-
-    return len(disks)
-
-
 def prepare_es_data(cluster, parsed_data):
     """
     Generate prepared ES data from pre-parsed data, as returned by
@@ -894,10 +926,6 @@ if __name__ == '__main__':
 
         print("{}/{} disks had mystery SMART data, {} had normal SMART data"
               .format(mystery_total, count_disks(es), smart_total))
-    if "smart_changes" in tasks:
-        pass
-    if "mystery_changes" in tasks:
-        pass
 
     if "profile_parse" in tasks:
         profile_parser(data_directory)
