@@ -67,7 +67,8 @@ def count_disks(es):
                 "aggs": {
                     "count_distinct_disks": {
                         "cardinality": {
-                                  "field": "disk_location"
+                            "field": "disk_location",
+                            "precision_threshold": 4000,
                         }
                     }
                 }
@@ -765,6 +766,39 @@ def es_get_data(es, index):
         yield data
 
 
+def es_get_disks(es, index):
+    """
+    Return a dictionary of cluster => [disks] as stored in the current
+    system. Disks are integer tuples of shelf number, bay number.
+    """
+    q = {"size": 1,
+         "aggs": {
+             "group_by_cluster": {
+                 "terms": {
+                     "size": 0,
+                     "field": "cluster_name"
+                 },
+                 "aggs": {
+                     "disks": {
+                         "terms": {
+                             "size": 0,
+                             "field": "disk_location"
+                         }}}}}}
+
+    cluster_disks = {}
+    res = es.search(index=index, body=q)
+    buckets = get_buckets(res, 'group_by_cluster')
+    for bucket in buckets:
+        cluster = bucket['key']
+        disk_buckets = bucket['disks']['buckets']
+        disks = sorted([tuple(map(int, b['key'].split(".")))
+                        for b in disk_buckets])
+        cluster_disks[cluster] = disks
+
+    return cluster_disks
+
+
+
 def as_es_index(prefix, datetime):
     """
     Generate a canonical ES index name from a datetime and a prefix.
@@ -916,7 +950,17 @@ if __name__ == '__main__':
         parse_into_es(es, index_files(data_directory))
 
     if "disks" in tasks:
-        print("Saw {} disks".format(count_disks(es)))
+        print("Disk count per cluster:")
+        print("\t Clstr \t First \t Last \t Total")
+        print("\t--------------------------------")
+        sum_count = 0
+        for cluster, disks in sorted(es_get_disks(es, index=ES_INDEX).items(),
+                                     key=lambda x: len(x[1]), reverse=True):
+            print("\t {} \t {:2d}.{:2d} \t {:2d}.{:2d} \t {:4d}"
+                  .format(cluster, *disks[0], *disks[-1], len(disks)))
+            sum_count += len(disks)
+        print("\t--------------------------------")
+        print("\t Sum: \t \t \t {:4d}".format(sum_count))
     if "smart_stats" in tasks:
         smart_total, mystery_total = 0, 0
         for cluster_counts in smart_counts_per_cluster(es).values():
