@@ -56,7 +56,11 @@ ES_INDEX = 'netapp-lowlevel-*'
 LOW_LEVEL_DATA_Q = '*'
 
 
-def count_disks(es):
+def es_count_disks_by_cluster(es, index, q):
+    """
+    Return a dictionary of cluster => count for a given query
+    """
+
     body = {
         "size": 0,
         "aggs": {
@@ -75,16 +79,18 @@ def count_disks(es):
             }
         }
     }
-    res = es.search(index=ES_INDEX, body=body)
-    buckets = get_buckets(res, aggregation_name="group_by_cluster")
-    cluster_count = {}
+    res = es.search(index=index, body=body, q=q)
+    cluster_counts = dict()
+    for bucket in get_buckets(res, aggregation_name="group_by_cluster"):
+        bucket_data = bucket['count_distinct_disks']
+        count = bucket_data['value']
+        cluster = bucket['key']
+        cluster_counts[cluster] = count
+    return cluster_counts
 
-    for cluster_bucket in buckets:
-        cluster = cluster_bucket['key']
-        count = cluster_bucket['count_distinct_disks']['value']
-        cluster_count[cluster] = count
 
-    return sum(cluster_count.values())
+def count_disks(es):
+    return sum(es_count_disks_by_cluster(es, ES_INDEX, q="*").values())
 
 
 def get_buckets(res, aggregation_name):
@@ -311,6 +317,10 @@ def extract_node_data(lines):
                 offset_hint=smart_pages_location)
         except IndexError:
             log.debug("No non-obfuscated SMART data")
+
+    if node_data['smart_data']:
+        log.info("Found SMART pages for disk(s) {}"
+                 .format(", ".join(node_data['smart_data'].keys())))
 
     return node_data
 
@@ -576,26 +586,24 @@ def take_duration(row_stream, hours=0, minutes=0, seconds=0):
             yield row
 
 
-def smart_counts_per_cluster(data_file_path):
+def smart_counts_per_cluster(es):
     """
     Return a dictionary of the number of SMART entries in the data file, by cluster:
 
     cluster => number of disks with smart data, number of disks with mystery data
     """
+    # As the SMART data is a dictionary,
+    smart_counts = es_count_disks_by_cluster(es, ES_INDEX, q="smart.1: *")
+    mystery_counts = es_count_disks_by_cluster(es, ES_INDEX, q="smart_mystery: *")
 
-    smart_disks = defaultdict(set)
-    smart_mystery_disks = defaultdict(set)
+    unified_counts = {}
+    for cluster in set(smart_counts.keys()).union(set(mystery_counts.keys())):
+        smart_count = smart_counts.get(cluster, 0)
+        mystery_count = mystery_counts.get(cluster, 0)
+        unified_counts[cluster] = (smart_count, mystery_count)
 
-    for row in take_duration(read_data_file(data_file_path), hours=1):
-        if row['smart_data']:
-            smart_disks[row['cluster']].add(row['disk'])
-        if row['smart_mystery']:
-            smart_mystery_disks[row['cluster']].add(row['disk'])
+    return unified_counts
 
-    all_cluster_names = set(smart_disks.keys()).union(set(smart_mystery_disks.keys()))
-
-    return {cluster: (len(smart_disks[cluster]), len(smart_mystery_disks[cluster]))
-                      for cluster in all_cluster_names}
 
 
 def patch_list_with_offset(previous_data, replacement_values, offset):
@@ -725,6 +733,10 @@ def prepare_es_data(cluster, parsed_data):
     for node_data in cluster_data.values():
         for disk_data in node_data['disk_overview']:
             disk_location = ".".join(disk_data[0].split(".")[1:])
+            smart_data = node_data['smart_data'].get(disk_location, None)
+            smart_mystery = node_data['smart_mystery'].get(disk_location, None)
+            disk_type = None
+            fw_version = None
             yield {
                 '_index': as_es_index(ES_INDEX_BASE, timestamp),
                 '_type': "document",
@@ -732,9 +744,8 @@ def prepare_es_data(cluster, parsed_data):
                     'cluster_name': cluster,
                     'disk_location': disk_location,
                     '@timestamp': timestamp,
-                    'smart': node_data['smart_data'].get(disk_location, None),
-                    'smart_mystery': node_data['smart_mystery'].get(
-                        disk_location, None),
+                    'smart': smart_data,
+                    'smart_mystery': smart_mystery,
                     'serial': disk_data[1],
                     'state': disk_data[2],
                     'avg_io': disk_data[3],
@@ -748,6 +759,8 @@ def prepare_es_data(cluster, parsed_data):
                     'sense_data5': disk_data[11],
                     'sense_data9': disk_data[12],
                     'sense_dataB': disk_data[13],
+                    'type': disk_type,
+                    'fw_version': fw_version,
                 }
             }
 
