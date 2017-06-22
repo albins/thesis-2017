@@ -10,6 +10,8 @@ import os
 import datetime
 import csv
 import statistics
+import time
+from datetime import timedelta
 
 import dateparser
 from elasticsearch import Elasticsearch
@@ -50,7 +52,7 @@ DATA_FILE_FIELDS = ["timestamp", "cluster", "disk", "serial",
 CSV_DELIMITER = ";"
 
 # db-51167.cern.ch:9200
-ELASTIC_ADDRESS = "localhost:9200"
+ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
 ES_INDEX_BASE = 'netapp-lowlevel'
 ES_INDEX = 'netapp-lowlevel-*'
 LOW_LEVEL_DATA_Q = '*'
@@ -1048,13 +1050,8 @@ def file_index_to_triplets(file_index):
     """
     Return tuples of cluster name, timestamp, filename, from an index.
     """
-    count = 0
     for cluster_name, ts_plus_filenames in file_index.items():
         for ts, filename in ts_plus_filenames:
-            count += 1
-            if count >= 100:
-                count = 0
-                break
             yield (cluster_name, ts, filename)
 
 
@@ -1074,6 +1071,21 @@ def is_actual(cn_ts_fn, last_seen):
         return True
 
 
+def estimate_rate(current_rate, min_rate, max_rate, avg_rate):
+    avg_weight = 5
+    min_weight = 3
+    present_weight = 4
+    max_weight = 1
+    sum_weights = min_weight + max_weight + present_weight + avg_weight
+
+    estimate = sum([present_weight*current_rate,
+                    min_weight*min_rate,
+                    max_weight*max_rate,
+                    avg_weight*avg_rate])/sum_weights
+
+    return estimate
+
+
 def file_index_to_es_data(file_index, last_seen, type_fw_index):
     """
     Generate entries to insert into es_import from a file index and
@@ -1085,11 +1097,43 @@ def file_index_to_es_data(file_index, last_seen, type_fw_index):
     total_num_files = sum([len(x) for x in file_index.values()])
     num_files_used = len(cluster_ts_filenames)
     skipped_files = total_num_files - num_files_used
+    interval_start_time = time.time()
+    interval_length = 20
+    min_rate = 999999999
+    max_rate = 0
+    average_rate = 0
+
 
     for i, (cluster, ts, filename) in enumerate(cluster_ts_filenames):
-        if i % 20 == 0:
-            log.info("Synced %d/%d files (%d skipped)...", i, num_files_used,
-                     skipped_files)
+        if i % interval_length == 0 and i != 0:
+            current_time = time.time()
+            interval_seconds = current_time - interval_start_time
+            interval_rate = interval_length/interval_seconds
+            average_rate = ((average_rate * (i-1)) + interval_rate)/i
+            min_rate = min(interval_rate, min_rate)
+            max_rate = max(interval_rate, max_rate)
+            files_remaining = num_files_used - i
+            estimated_rate = estimate_rate(interval_rate, min_rate, max_rate,
+                                           average_rate)
+            seconds_remaining = files_remaining/estimated_rate
+            time_remaining = timedelta(seconds=seconds_remaining)
+            log.info(("Synced %d/%d files (%d skipped)."
+                      " Meaning %d [%d--%d] files/s,"
+                      " %s remaining at this rate."),
+                     i,
+                     num_files_used,
+                     skipped_files,
+                     interval_rate,
+                     min_rate,
+                     max_rate,
+                     str(time_remaining))
+            interval_start_time = time.time()
+            if interval_seconds < 3 or interval_seconds > 7:
+                interval_length = int(estimated_rate * 5)
+                log.debug("Interval ran in %d s, adjusting interval length to %d",
+                         interval_seconds,
+                         interval_length)
+
         for data_point in prepare_es_data(cluster,
                                           process_data_file(ts, filename),
                                           type_fw_index):
