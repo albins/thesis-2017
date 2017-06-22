@@ -13,7 +13,7 @@ import statistics
 
 import dateparser
 from elasticsearch import Elasticsearch
-from elasticsearch.helpers import scan, parallel_bulk
+from elasticsearch.helpers import scan, parallel_bulk, streaming_bulk
 import pytz
 
 log = logging.getLogger()
@@ -50,7 +50,7 @@ DATA_FILE_FIELDS = ["timestamp", "cluster", "disk", "serial",
 CSV_DELIMITER = ";"
 
 # db-51167.cern.ch:9200
-ELASTIC_ADDRESS = "localhost"
+ELASTIC_ADDRESS = "localhost:9200"
 ES_INDEX_BASE = 'netapp-lowlevel'
 ES_INDEX = 'netapp-lowlevel-*'
 LOW_LEVEL_DATA_Q = '*'
@@ -174,36 +174,108 @@ def read_smart_pages(lines, offset_hint=0):
     return offset, disks
 
 
+def read_table(lines, start_re, re_offset, reducer, accumulator={},
+               offset_hint=0, is_at_end=None):
+    """
+    - reducer: takes accumulator and the columns, returns the new value
+      of the accumulator. May raise a ValueError to indicate invalid
+      input (which will be ignored).
+    - start_re: regular expression to seek to
+    - re_offset: how many lines to skip before parsing
+    - is_at_end(i, lines): determines if we should stop here, at
+      lines[i]. Default is two consecutive empty lines.
+
+    Returns a tuple of last location, accumulator.
+    """
+    if not is_at_end:
+        is_at_end = lambda i, lines: not lines[i].strip()\
+                    and not lines[i+1].strip()
+
+    offset, _match = seek_to(lines, re=start_re, offset_hint=offset_hint)
+    offset += re_offset
+    for i, line in enumerate(lines[offset:], start=offset):
+        if is_at_end(i, lines):
+            break
+        # Filter out anything unreasonable
+        columns = [c.strip() for c in regex.split("\s+", line) if c.strip()]
+        try:
+            accumulator = reducer(accumulator, columns)
+        except ValueError as e:
+            log.warning("Error reading table columns on line {} ({}): {}"
+                        .format(i, " ".join(columns), e))
+            continue
+    return i, accumulator
+
+
+def extract_id_column(columns):
+    id_s, rest = columns[0].split(".")
+    if rest.strip():
+        # Apparently, the two first columns have merged
+        columns = [id_s, rest, *columns[1:]]
+
+    id = int(id_s)
+    return (id, columns)
+
+
+
+def read_io_completions_per_disk(lines, offset_hint=0):
+    """
+    Return offset, {disk => (index, <data>)}
+    """
+
+    def acc_disks(disks, columns):
+        id, columns = extract_id_column(columns)
+        if not len(columns) == 7:
+            raise ValueError("Wrong number of columns for I/O completions: {}"
+                             .format(len(columns)))
+
+        disk = disk_to_location(columns[1])
+        io_values = [int(x) for x in columns[2:]]
+        disks[disk] = tuple([id, *io_values])
+        return disks
+
+    heading_re = regex.compile("^IO completions per disk.*")
+    return read_table(lines, start_re=heading_re,
+                      re_offset=3, reducer=acc_disks,
+                      offset_hint=offset_hint)
+
+def read_io_ompletion_times_per_index(lines, offset_hint=0):
+    """
+    Return offset, index => (histogram)
+    """
+    def acc_indices(indices, columns):
+        # Fixme: make sure columns have the correct length
+        id, columns = extract_id_column(columns)
+        if not len(columns) == 17:
+            raise ValueError("Wrong number of columns for I/O completions: {}"
+                             .format(len(columns)))
+
+        values = tuple([int(x) for x in columns[1:]])
+        indices[id] = values
+        return indices
+
+    heading_re = regex.compile("^I/O Completion Time Table.*")
+    return read_table(lines, start_re=heading_re, re_offset=5,
+                      reducer=acc_indices,
+                      offset_hint=offset_hint)
+
+
 def read_disk_overview(lines):
     """
     Disk overview is one row per disk, featuring:
                             Serial                 Disk   Average   Max    Retry  Timeout  Sense Data
     Disk                    Number                 State   I/O      I/O    count  count    1       2      3     4     5     9   B
     """
-    disk_overview = list()
-    line_index, _match = seek_to(lines, re=underline_re)
-    line_index += 1
+    def acc_disks(disks, columns):
+        if not len(columns) == 14:
+            raise ValueError("Invalid disk overview line!")
+        disk_cells = columns[:3] + [int(x) for x in columns[3:]]
+        disks.append(disk_cells)
+        return disks
 
-    for line_index, line in enumerate(lines[line_index:], start=line_index):
-        if not line.strip():
-            # Empty line -- terminator
-            break
-        else:
-            # The final "column" is junk:
-            disk_strs = regex.split("\s+", line)[:-1]
-            try:
-                disk_cells = disk_strs[:3] + [int(x) for x in disk_strs[3:]]
-            except ValueError as e:
-                log.error("Error processing line %d '%s': %s",
-                          line_index, line.strip(), str(e))
-                continue
-            if len(disk_cells) == 14:
-                disk_overview.append(disk_cells)
-            else:
-                log.error("Invalid line %s generated from line %d: '%s'",
-                          str(disk_cells), line_index, line.strip())
-
-    return line_index, disk_overview
+    return read_table(lines, start_re=underline_re, re_offset=1,
+                      reducer=acc_disks, accumulator=[],
+                      is_at_end=lambda i, lines: not lines[i].strip())
 
 
 def identify_headings(lines):
@@ -318,9 +390,12 @@ def extract_node_data(lines):
         except IndexError:
             log.debug("No non-obfuscated SMART data")
 
-    if node_data['smart_data']:
-        log.info("Found SMART pages for disk(s) {}"
-                 .format(", ".join(node_data['smart_data'].keys())))
+    offset, node_data['io_completions'] = read_io_completions_per_disk(
+        lines,
+        offset_hint=offset)
+
+    _, node_data['io_completion_times'] = read_io_ompletion_times_per_index(
+        lines, offset_hint=offset)
 
     return node_data
 
@@ -338,7 +413,10 @@ def read_cluster_data_snapshot(filename):
       - sense_error => {}
       - smart_mystery => [matrix]
       - smart_data => {disk_label => {SMART_id => (status, value, worst value, raw value)}}
-
+      - io_completions => disk => (index, CPIO blocks read, blocks read, blocks written, verifies, MaxQ)
+      - io_completions_times => index => (4ms, 8ms, 16ms, 30ms, 50ms,
+        100ms, 200ms, 400ms, 800ms, 2000ms, 4000ms, 16000ms, 30 000ms,
+        45 000ms, 60 000 ms, 100 000ms)
     """
     cluster_data = defaultdict(list)
     current_node = None
@@ -390,6 +468,94 @@ def index_files(path):
                 full_path = os.path.join(subdir, file)
                 filenames[node].append((timestamp, full_path))
     return {k: sorted(v) for k, v in filenames.items()}
+
+
+def disk_to_location(disk_str):
+    """
+    Translate a string on the format connector.shelf.bay to shelf.bay,
+    with normalised numbers.
+    """
+    try:
+        shelf, bay = [int(x) for x in disk_str.split(".")[1:]]
+    except ValueError:
+        raise ValueError('Invalid disk string "{}"'.format(disk_str)) from None
+    return "{:d}.{:d}".format(shelf, bay)
+
+
+def disk_types_and_serials_from_path(path):
+    """
+    Returns a mapping of cluster => disk_location => [(ts, type, firmware revision)])
+
+    All timestamps are timezone-aware, timestamps presumed to be
+    UTC. Sorted by timestamp.
+    """
+
+
+    serials_re = regex.compile("db(?<cluster_name>.*?)"
+                               "-cluster-mgmt-disk-types\.(?<timestamp>.*?)\.csv\.gz$")
+
+    disk_types_by_cluster = defaultdict(lambda: defaultdict(list))
+    for subdir, _dirs, files in os.walk(path):
+        for file in files:
+            match = serials_re.match(file)
+            if not match:
+                continue
+            else:
+                cluster = match.group('cluster_name')
+                timestamp = datetime.datetime.fromtimestamp(
+                    float(match.group('timestamp')),
+                    pytz.utc)
+                full_path = os.path.join(subdir, file)
+
+                # Parse the file as CSV
+                with gz.open(full_path, 'rt') as data_fp:
+                    reader = csv.DictReader(data_fp, delimiter="+")
+                    for row in reader:
+                        try:
+                            disk = disk_to_location(row['disk'])
+                            firmware = row['revision']
+                            disk_type = row['type']
+                            if not firmware or not disk_type:
+                                raise ValueError
+                        except ValueError as e:
+                            log.warning("Invalid disk type data row '%s'",
+                                        row)
+                            continue
+
+                        disk_types_by_cluster[cluster][disk].append(
+                            (timestamp, firmware, disk_type))
+
+    return disk_types_by_cluster
+
+
+
+def get_closest_disk_data(serials_index, cluster, disk_location, ts):
+    """
+    Takes a timezone-aware timestamp and finds the closest associated
+    firmware and type data for that disk.
+
+    Returns None if the data wasn't available, otherwise F/W version, disk type
+    """
+    disk_data_points = serials_index.get(cluster, {}).get(disk_location, [])
+
+    if not disk_data_points:
+        log.warning("Found NO type, F/W data for {}:{}"
+                    .format(cluster, disk_location))
+        return (None, None)
+
+    best_match = (disk_data_points[0][1], disk_data_points[0][2])
+    match_distance = abs(ts - disk_data_points[0][0])
+    for data_ts, fw_version, disk_type in disk_data_points[1:]:
+        distance = abs(ts - data_ts)
+        if distance < match_distance:
+            best_match = (fw_version, disk_type)
+            match_distance = distance
+
+        if distance > match_distance:
+            # If distance is growing, we are moving away from the
+            # solution
+            break
+    return best_match
 
 
 def process_data_file(ts, file_name):
@@ -634,7 +800,7 @@ def data_to_list(data_by_node):
         for data_row in node_data['disk_overview']:
             raw_label, overview_data = data_row[0], data_row[1:]
             # Remove everything before the first . (the connector)
-            proper_label = ".".join(raw_label.split(".")[1:])
+            proper_label = disk_to_location(raw_label)
             disk_data[proper_label] = overview_data
 
         for disk_label, smart_dict in node_data['smart_data'].items():
@@ -720,7 +886,7 @@ def parse_incrementally(file_index, data_file):
             filewriter.writerow(row)
 
 
-def prepare_es_data(cluster, parsed_data):
+def prepare_es_data(cluster, parsed_data, type_fw_index):
     """
     Generate prepared ES data from pre-parsed data, as returned by
     process_data_file().
@@ -732,11 +898,16 @@ def prepare_es_data(cluster, parsed_data):
     # Ignore node names
     for node_data in cluster_data.values():
         for disk_data in node_data['disk_overview']:
-            disk_location = ".".join(disk_data[0].split(".")[1:])
+            disk_location = disk_to_location(disk_data[0])
             smart_data = node_data['smart_data'].get(disk_location, None)
             smart_mystery = node_data['smart_mystery'].get(disk_location, None)
-            disk_type = None
-            fw_version = None
+            completions = node_data['io_completions'].get(disk_location)
+            fw_version, disk_type = get_closest_disk_data(type_fw_index,
+                                                          cluster,
+                                                          disk_location,
+                                                          timestamp)
+            completion_times = node_data['io_completion_times']\
+                               .get(completions[0])
             yield {
                 '_index': as_es_index(ES_INDEX_BASE, timestamp),
                 '_type': "document",
@@ -761,6 +932,9 @@ def prepare_es_data(cluster, parsed_data):
                     'sense_dataB': disk_data[13],
                     'type': disk_type,
                     'fw_version': fw_version,
+                    # Remember, the first column of the tuple is the ID:
+                    'io_completions': completions[1:],
+                    'io_completion_times': completion_times,
                 }
             }
 
@@ -862,7 +1036,7 @@ def es_import(es, documents):
     """
     Take a generator of documents and index them.
     """
-    for result in parallel_bulk(es, documents):
+    for result in parallel_bulk(es, documents, raise_on_error=True):
         succeeded, description = result
         if not succeeded:
             log.error(description)
@@ -874,8 +1048,13 @@ def file_index_to_triplets(file_index):
     """
     Return tuples of cluster name, timestamp, filename, from an index.
     """
+    count = 0
     for cluster_name, ts_plus_filenames in file_index.items():
         for ts, filename in ts_plus_filenames:
+            count += 1
+            if count >= 100:
+                count = 0
+                break
             yield (cluster_name, ts, filename)
 
 
@@ -895,7 +1074,7 @@ def is_actual(cn_ts_fn, last_seen):
         return True
 
 
-def file_index_to_es_data(file_index, last_seen):
+def file_index_to_es_data(file_index, last_seen, type_fw_index):
     """
     Generate entries to insert into es_import from a file index and
     high-water-mark dictionary.
@@ -912,11 +1091,12 @@ def file_index_to_es_data(file_index, last_seen):
             log.info("Synced %d/%d files (%d skipped)...", i, num_files_used,
                      skipped_files)
         for data_point in prepare_es_data(cluster,
-                                          process_data_file(ts, filename)):
+                                          process_data_file(ts, filename),
+                                          type_fw_index):
             yield data_point
 
 
-def parse_into_es(es, file_index):
+def parse_into_es(es, file_index, type_fw_index):
     """
     Intelligently take a file index dictionary and sync it with an ES
     instance.
@@ -925,7 +1105,7 @@ def parse_into_es(es, file_index):
     log.info("Using high-water mark: {}".format(
         ", ".join(["{}: {}".format(c, str(v)) for c, v in last_seen.items()])))
 
-    es_import(es, file_index_to_es_data(file_index, last_seen))
+    es_import(es, file_index_to_es_data(file_index, last_seen, type_fw_index))
 
 
 def runtime_statistics(runtimes):
@@ -960,7 +1140,8 @@ if __name__ == '__main__':
     es = Elasticsearch([ELASTIC_ADDRESS])
 
     if "incremental_es" in tasks:
-        parse_into_es(es, index_files(data_directory))
+        type_fw_index = disk_types_and_serials_from_path(data_directory)
+        parse_into_es(es, index_files(data_directory), type_fw_index)
 
     if "disks" in tasks:
         print("Disk count per cluster:")
