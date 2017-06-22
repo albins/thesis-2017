@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from parse_emails import format_counter
+from parse_smart_pages import count_disks
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+import sys
 
 import pytz
 import regex
@@ -159,6 +161,7 @@ def print_broken_disks_report(es):
 def print_correlation_report(es):
     broken_disks = set()
     disks_with_bad_blocks = set()
+    disk_count = count_disks(es)
 
     broken_disk_data = cluster_broken_disks(get_broken_disks(es))
     for cluster, cluster_disks in broken_disk_data.items():
@@ -169,7 +172,7 @@ def print_correlation_report(es):
         for disk_name in bad_blocks.keys():
             disks_with_bad_blocks.add((cluster, disk_name))
 
-    print("Broken disks with bad blocks: ({})"
+    print("Broken disks with bad blocks: {} ({})"
           .format(broken_disks & disks_with_bad_blocks,
                   len(broken_disks & disks_with_bad_blocks)))
     print("Broken disks without bad blocks: {} ({})"
@@ -178,6 +181,15 @@ def print_correlation_report(es):
     print("Non-broken disks with bad blocks: {} ({})"
           .format(disks_with_bad_blocks - broken_disks,
                   len(disks_with_bad_blocks - broken_disks)))
+
+    print("P(broken disk) = {:3.2f}%"
+          .format(len(broken_disks)*100/disk_count))
+    print("P(bad blocks) = {:3.2f}%"
+          .format(len(disks_with_bad_blocks)*100/disk_count))
+    print("P(bad block| broken disk) = {:3.2f}%"
+          .format(len(broken_disks & disks_with_bad_blocks)*100/len(broken_disks)))
+    print("P(broken disk| bad blocks) = {:3.2f}%"
+          .format(len(broken_disks & disks_with_bad_blocks)*100/len(disks_with_bad_blocks)))
 
 
 def get_scrubbing_durations(es):
@@ -229,9 +241,52 @@ def print_scrubbing_report(es):
           .format(str(min_delta), str(max_delta)))
 
 
+def get_overview_data(es, cluster_name, disk_name):
+    pass
+
+
+def print_report(data):
+    pass
+
+
+def failed_at(es, cluster_name, disk_name):
+    pass
+
+
+def first_trouble(es, cluster_name, disk_name):
+    pass
+
+
+def trouble_messages(es, cluster_name, disk_name):
+    pass
+
+
+def bad_blocks(es, cluster_name, disk_name):
+    pass
+
+
+def scrubbing_times(es, cluster_name, disk_name):
+    pass
+
+
+def timeouts(es, cluster_name_disk_name):
+    pass
+b
+
 if __name__ == '__main__':
     es = Elasticsearch([ELASTIC_ADDRESS])
-    #print_bad_blocks_report(es)
-    #print_broken_disks_report(es)
-    #print_correlation_report(es)
-    print_scrubbing_report(es)
+
+    if not len(sys.argv) == 3:
+        print_scrubbing_report(es)
+        print_bad_blocks_report(es)
+        print_broken_disks_report(es)
+        print_correlation_report(es)
+
+        exit(0)
+
+    cluster = sys.argv[1]
+    disk_name = sys.argv[2]
+    cluster = sys.argv[1]
+    disk_name = sys.argv[2]
+
+    print_report(get_overview_data(es, cluster, disk_name))
