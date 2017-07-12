@@ -4,8 +4,10 @@ from parse_smart_pages import count_disks
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+import time
 import sys
 import logging
+import argparse
 
 import pytz
 import regex
@@ -15,7 +17,6 @@ from elasticsearch.helpers import scan
 import dateparser
 
 log = logging.getLogger()
-log.setLevel(logging.INFO)
 
 #ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
 ELASTIC_ADDRESS = "localhost:9200"
@@ -69,7 +70,7 @@ HARD_FAILURE_INDICATORS = ["raid.fdr.reminder",
                            "raid.disk.unload.done"]
 
 ONE_WEEK = timedelta(hours=7*24)
-
+UTC_NOW =  datetime.fromtimestamp(time.time(), tz=pytz.utc)
 
 Q_TROUBLE_EVENTS = Q("bool", should=[*[Q('match', event_type=t)
                                        for t in TROUBLE_REASONS],
@@ -84,6 +85,17 @@ Q_JUNK_EVENTS = Q('term', event_type="cf.disk.skipped")
 
 DISK_FAIL_Q = " OR ".join(["event_type: {}".format(e) for e in FAIL_REASONS])
 SCRUB_TIME_Q = "tags: Disk_Scrub_Complete AND scrub_seconds: *"
+TYPE_TO_NUMBER = {'ssd': 1, 'fsas': 2, 'bsas': 3}
+NUMBER_TO_TYPE = {v: k for k, v in TYPE_TO_NUMBER.items()}
+
+
+def windowed_query(es, index, start, end):
+    s = Search(using=es, index=index)\
+        .sort({"@timestamp": {"order": "asc"}})\
+        .filter("range", **{'@timestamp':
+                            {'gte': start,
+                             'lte': end}})
+    return s
 
 
 def windowed_syslog(es, center, width):
@@ -94,14 +106,7 @@ def windowed_syslog(es, center, width):
     radius = width/2
     start = center - radius
     end = center + radius
-
-
-    s = Search(using=es, index=ES_SYSLOG_INDEX)\
-        .sort({"@timestamp": {"order": "asc"}})\
-        .filter("range", **{'@timestamp':
-                            {'gte': start,
-                             'lte': end}})
-    return s
+    return windowed_query(es, index=ES_SYSLOG_INDEX, start=start, end=end)
 
 
 def get_broken_block(message_body):
@@ -388,8 +393,8 @@ def get_overview_data(es, cluster_name, disk_name):
         'last_non_trouble_log': last_non_trouble,
         'bad_blocks_status': bad_blocks_status,
         'prediction_status': prediction_status,
-        'smart_history': get_smart_history(cluster, disk_name),
-        'disk_type': get_disk_type(es, cluster, disk_name),
+        'smart_history': get_smart_history(cluster_name, disk_name),
+        'disk_type': get_disk_type(es, cluster_name, disk_name),
     }
 
 
@@ -639,24 +644,170 @@ def non_troubles(es, cluster_name, disk_name, before="now"):
         yield deserialise_log_entry(r)
 
 
-def timeouts(es, cluster_name_disk_name):
+def print_prediction_stats(es):
+
+    # identify failed drives
+    # for each such drive, determine if it was failed
+    # determine if the drive was predicted
+
+    # identify mispredictions
+
+    # Prediction count: count of predicted drives
+    # Failure count: number of failed drives
+    # True positive rate: number of correctly predicted drives/number of failed drives
+    # False positive rate: count of predicted / count of all predictions
     pass
 
 
-if __name__ == '__main__':
-    es = Elasticsearch([ELASTIC_ADDRESS])
+def get_disks(es):
+    # return:
+    # type => string
+    # disk_location => string
+    # cluster_name => string
+    # broke_at => list of times that disk first broke, or None
+    pass
 
-    if not len(sys.argv) == 3:
+
+def broken_disks_per_cluster(es):
+    # return cluster_name => broken disk count
+    pass
+
+
+def window_disk_data(es, disk, start=None, end=UTC_NOW):
+    #   - number of bad blocks for drive (syslog)
+    #   - standard deviation of bad block numbers (syslog)
+    #   - count of pre-fail messages, not ready counts etc (syslog)
+    #   - read error count for drive (lldata)
+    #   - smart (values to columns) (lldata)
+    #   - smart_mystery (values to 212 columns) (lldata)
+    #   - min, max, delta for:
+    #     - number of IO completions (len 5) (lldata)
+    #     - io_completion_times (len 16) (lldata)
+    #     - retry_count (lldata)
+    #     - avg_io (lldata)
+    #     - max_io (lldata)
+    #     - timeout_count (lldata)
+    #     - sense_data1-9+B (lldata)
+    pass
+
+
+def normalise_type(disk_type_str):
+    """
+    Take a disk type string, as reported by the database, and transform
+    it to a number 1-3. -1 for no match.
+    """
+    try:
+        cleaned_type = (str(disk_type_str)).strip().lower()
+        return TYPE_TO_NUMBER[cleaned_type]
+    except IndexError:
+        log.error("No such disk type '%s'!", disk_type_str)
+        return -1
+
+
+def prepare_training_data(es):
+    # for each cluster:
+    # - count of broken disks in cluster
+    #
+    # for each disk:
+    # - broken 1/0
+    # - type of disk (normalise to int)
+    # - for each window (12h, 48h, week, all time):
+    #   - read error count for drive
+    #   - number of bad blocks for drive
+    #   - standard deviation of bad block numbers
+    #   - smart (values to columns)
+    #   - smart_mystery (values to columns)
+    #   - count of pre-fail messages, not ready counts etc
+    #   - min, max, delta for:
+    #     - number of IO completions (len 5)
+    #     - io_completion_times (len 16)
+    #     - retry_count
+    #     - avg_io
+    #     - max_io
+    #     - timeout_count
+    #     - sense_data1-9+B
+
+    broken_count = broken_disks_per_cluster(es)
+    disks = get_disks(es)
+
+    for disk in disks:
+        is_broken = 0 if disk['broke_at'] is None else 1
+        disk_label = disk['disk_location']
+
+        # Fixme: handle disks failing twice!
+        window_end = UTC_NOW if not disk['broke_at'] else min(disk['broke_at'])
+
+        twelve_h, fourtyeight_h, week = map(
+            lambda t: window_disk_data(es, disk_label, start=t, end=window_end),
+            [UTC_NOW - dur for dur in [timedelta(hours=12),
+                                       timedelta(hours=48), ONE_WEEK]])
+
+        all_time = window_disk_data(es, disk_label)
+
+
+        yield [is_broken, normalise_type(disk['type']),
+               broken_count[disk['cluster_name']],
+               *twelve_h, *fourtyeight_h, *week, *all_time]
+
+
+def make_report(es, args):
+    includes = set(args.include)
+    if "scrub" in includes:
         print_scrubbing_report(es)
+    if "bad_blocks" in includes:
         print_bad_blocks_report(es)
+    if "broken_disks" in includes:
         print_broken_disks_report(es)
+    if  "correlation" in includes:
         print_correlation_report(es)
+    if "prediction_stats" in includes:
+        print_prediction_stats(es)
 
-        exit(0)
 
-    cluster = sys.argv[1]
-    disk_name = sys.argv[2]
-    cluster = sys.argv[1]
-    disk_name = sys.argv[2]
+def make_training_data(es, args):
+    for row in prepare_training_data(es):
+        print(row)
 
+
+def make_disk_report(es, args):
+    cluster = args.cluster.lower()
+    disk_name = args.disk_location
     print_disk_report(get_overview_data(es, cluster, disk_name))
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument('--verbose', '-v', action='count', dest='verbose_count',
+                        default=0)
+    parser.add_argument('--timeout_s', '-t', nargs='?', dest='timeout',
+                        default=10,
+                        type=int, help="Database operation timeout in seconds")
+    parser.add_argument('--es_node', '-s', nargs='*', type=str,
+                        dest='es_nodes',
+                        help="Elasticsearch node to connect to",
+                        default=[ELASTIC_ADDRESS])
+    subparsers = parser.add_subparsers(title='operations',
+                                       help="valid operations")
+    parser_report = subparsers.add_parser('report',
+                                          help="Generate reports")
+    parser_report.add_argument('include', type=str, nargs='+',
+                               choices=["scrub", "bad_blocks",
+                                        "broken_disks", "correlation",
+                                        "prediction_stats"])
+    parser_report.set_defaults(func=make_report)
+
+    parser_training = subparsers.add_parser('training',
+                                            help="Generate training data")
+    parser_training.set_defaults(func=make_training_data)
+
+    parser_disk_report = subparsers.add_parser('disk',
+                                               help="Show history for a given disk")
+    parser_disk_report.add_argument('cluster', type=str)
+    parser_disk_report.add_argument('disk_location', type=str)
+    parser_disk_report.set_defaults(func=make_disk_report)
+
+    args = parser.parse_args()
+    log_level = (max(3 - args.verbose_count, 0) * 10)
+    log.setLevel(log_level)
+    es_conn = Elasticsearch(args.es_nodes, timeout=args.timeout)
+    args.func(es=es_conn, args=args)
