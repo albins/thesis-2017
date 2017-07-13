@@ -21,7 +21,8 @@ log = logging.getLogger()
 #ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
 ELASTIC_ADDRESS = "localhost:9200"
 ES_SYSLOG_INDEX = "syslog-*"
-ES_LOWLEVEL_INDEX = 'netapp-lowlevel-*'
+ES_LOWLEVEL_BASE = 'netapp-lowlevel'
+ES_LOWLEVEL_INDEX = '{}-*'.format(ES_LOWLEVEL_BASE)
 READERR_REPAIR_Q = "event_type: raid.rg.readerr.repair.*",
 FAIL_REASONS = ["raid.config.filesystem.disk.failed",
                 "raid.disk.online.fail",
@@ -659,18 +660,83 @@ def print_prediction_stats(es):
     pass
 
 
+def bucket_broken_disks(failure_messages, window_width):
+    """
+    return a mapping of cluster name -> disk name -> [t0, t1, ... tn]
+    for times the disk broke.
+    """
+    # cluster -> disk -> [t0, t1, ... tn]
+    broke_at = defaultdict(lambda: defaultdict(list))
+    for msg in failure_messages:
+        cluster = msg['cluster_name']
+        disk = msg['disk_location']
+        ts = msg['@timestamp']
+
+        # it's the first occurrence in this location
+        if not disk in broke_at[cluster]:
+            broke_at[cluster][disk].append(ts)
+        else:
+            time_since_last_failure = min([abs(ts - recorded_time)
+                                           for recorded_time in
+                                           broke_at[cluster][disk]])
+            if time_since_last_failure > ONE_WEEK:
+                # If it's been one WEEK since we last observed the disk
+                # breaking, presume it's a new fault.
+                broke_at[cluster][disk].append(ts)
+                log.info("It's been a week -- presume a new failure for %s %s",
+                         cluster, disk)
+            else:
+                log.debug("Discarding recent failure for %s %s: %s",
+                          cluster, disk, time_since_last_failure)
+    return broke_at
+
+
 def get_disks(es):
-    # return:
-    # type => string
-    # disk_location => string
-    # cluster_name => string
-    # broke_at => list of times that disk first broke, or None
-    pass
+    broke_at = bucket_broken_disks(get_broken_disks(es),
+                                   window_width=ONE_WEEK)
+
+    ok_index = "{}-2017-06-21".format(ES_LOWLEVEL_BASE)
+    search_start = datetime(2017, 6, 21, tzinfo=pytz.utc)
+    search_end = search_start + timedelta(minutes=20)
 
 
-def broken_disks_per_cluster(es):
-    # return cluster_name => broken disk count
-    pass
+    s = Search(using=es, index=ok_index)\
+        .filter("range", **{'@timestamp':
+                            {'gte': search_start,
+                             'lte': search_end}})
+
+    cluster_disks = defaultdict(dict)
+    found_disks = 0
+    disk_count = count_disks(es)
+
+    for res in s.scan():
+        if found_disks >= disk_count:
+            log.info("Found data for all disks -- bailing out!")
+            break
+        data = res.to_dict()
+        cluster = data['cluster_name']
+        disk = data['disk_location']
+        c_broken_count = len(broke_at.get(cluster, {}))
+
+        if not disk in cluster_disks[cluster]:
+            log.debug("Found new data for %s %s. Got %d/%d entries so far",
+                      cluster, disk, found_disks, disk_count)
+            broke_data = broke_at[cluster][disk] if disk in broke_at[cluster]\
+                         else None
+            disk_type = data['type']
+            cluster_disks[cluster][disk] = {'cluster_name': cluster,
+                                            'disk_location': disk,
+                                            'broke_at': broke_data,
+                                            'type': normalise_type(disk_type),
+                                            'c_broken_count': c_broken_count}
+            found_disks += 1
+        else:
+            log.debug("Ignoring data for %s %s. Got %d entries so far",
+                      cluster, disk, found_disks)
+
+    for cluster_data in cluster_disks.values():
+        for disk_data in cluster_data.values():
+            yield disk_data
 
 
 def window_disk_data(es, disk, start=None, end=UTC_NOW):
@@ -688,7 +754,7 @@ def window_disk_data(es, disk, start=None, end=UTC_NOW):
     #     - max_io (lldata)
     #     - timeout_count (lldata)
     #     - sense_data1-9+B (lldata)
-    pass
+    return []
 
 
 def normalise_type(disk_type_str):
@@ -726,8 +792,6 @@ def prepare_training_data(es):
     #     - max_io
     #     - timeout_count
     #     - sense_data1-9+B
-
-    broken_count = broken_disks_per_cluster(es)
     disks = get_disks(es)
 
     for disk in disks:
@@ -745,8 +809,8 @@ def prepare_training_data(es):
         all_time = window_disk_data(es, disk_label)
 
 
-        yield [is_broken, normalise_type(disk['type']),
-               broken_count[disk['cluster_name']],
+        yield [is_broken, disk['type'],
+               disk['c_broken_count'],
                *twelve_h, *fourtyeight_h, *week, *all_time]
 
 
@@ -786,14 +850,17 @@ if __name__ == '__main__':
                         dest='es_nodes',
                         help="Elasticsearch node to connect to",
                         default=[ELASTIC_ADDRESS])
+
     subparsers = parser.add_subparsers(title='operations',
                                        help="valid operations")
     parser_report = subparsers.add_parser('report',
                                           help="Generate reports")
+
     parser_report.add_argument('include', type=str, nargs='+',
                                choices=["scrub", "bad_blocks",
                                         "broken_disks", "correlation",
                                         "prediction_stats"])
+
     parser_report.set_defaults(func=make_report)
 
     parser_training = subparsers.add_parser('training',
