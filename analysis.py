@@ -8,6 +8,7 @@ import time
 import sys
 import logging
 import argparse
+import statistics
 
 import pytz
 import regex
@@ -88,14 +89,15 @@ DISK_FAIL_Q = " OR ".join(["event_type: {}".format(e) for e in FAIL_REASONS])
 SCRUB_TIME_Q = "tags: Disk_Scrub_Complete AND scrub_seconds: *"
 TYPE_TO_NUMBER = {'ssd': 1, 'fsas': 2, 'bsas': 3}
 NUMBER_TO_TYPE = {v: k for k, v in TYPE_TO_NUMBER.items()}
+SMART_LENGTH = 16
+SMART_MYSTERY_LENGTH = 212
 
+def windowed_query(s, start=None, end=UTC_NOW):
+    time_range = {'gte': start} if start else {}
+    time_range['lte'] = end
 
-def windowed_query(es, index, start, end):
-    s = Search(using=es, index=index)\
-        .sort({"@timestamp": {"order": "asc"}})\
-        .filter("range", **{'@timestamp':
-                            {'gte': start,
-                             'lte': end}})
+    s = s.sort({"@timestamp": {"order": "asc"}})\
+        .filter("range", **{'@timestamp': time_range})
     return s
 
 
@@ -107,7 +109,9 @@ def windowed_syslog(es, center, width):
     radius = width/2
     start = center - radius
     end = center + radius
-    return windowed_query(es, index=ES_SYSLOG_INDEX, start=start, end=end)
+
+    return windowed_query(Search(using=es, index=ES_SYSLOG_INDEX),
+                          start=start, end=end)
 
 
 def get_broken_block(message_body):
@@ -420,17 +424,24 @@ def get_disk_type(es, cluster, disk):
     return result['type']
 
 
-def get_disk_bad_blocks(es, cluster_name, disk_name):
+def get_disk_bad_blocks(es, cluster_name, disk_name, start=None, end=UTC_NOW):
     """
     Return a set of (bad_block_no) for a given disk.
     """
-    # FIXME: query-filter this on ES!
+    s = Search(using=es, index=ES_SYSLOG_INDEX)\
+        .query(Q('wildcard', event_type="raid.rg.readerr.repair.*"))
+
+    s = filter_by_cluster_disk(windowed_query(s, start=start, end=end),
+                               cluster_name=cluster_name,
+                               disk_location=disk_name)
 
     bad_blocks = set()
-    for _ts, cluster, disk_location, block in get_bad_blocks(es):
-        if cluster != cluster_name or disk_location != disk_name:
-            continue
-        bad_blocks.add(block)
+    for msg in s.scan():
+        log.debug("Got broken block for %s %s",
+                  cluster_name, disk_name)
+        body = msg.to_dict()["body"]
+        broken_block = get_broken_block(body)
+        bad_blocks.add(broken_block)
 
     return bad_blocks
 
@@ -597,7 +608,7 @@ def deserialise_log_entry(entry):
     return log_entry
 
 
-def troubles(es, cluster_name, disk_name, before="now"):
+def troubles(es, cluster_name, disk_name, before="now", after=None):
     """
     Return all trouble-related log entries before a given date (or now,
     if there was no such date)
@@ -605,11 +616,10 @@ def troubles(es, cluster_name, disk_name, before="now"):
     q_cluster_disk = Q('bool', must=[Q_TROUBLE_EVENTS])
 
     s = Search(using=es, index=ES_SYSLOG_INDEX)\
-        .query(q_cluster_disk)\
-        .sort({"@timestamp": {"order": "asc"}})\
-        .filter("range", **{'@timestamp': {'lt': before}})
+        .query(q_cluster_disk)
 
-    s = filter_by_cluster_disk(s, cluster_name, disk_name)
+    s = windowed_query(filter_by_cluster_disk(s, cluster_name, disk_name),
+                       start=after, end=before)
 
     for r in s:
         yield deserialise_log_entry(r)
@@ -739,22 +749,101 @@ def get_disks(es):
             yield disk_data
 
 
-def window_disk_data(es, disk, start=None, end=UTC_NOW):
-    #   - number of bad blocks for drive (syslog)
-    #   - standard deviation of bad block numbers (syslog)
-    #   - count of pre-fail messages, not ready counts etc (syslog)
-    #   - read error count for drive (lldata)
-    #   - smart (values to columns) (lldata)
-    #   - smart_mystery (values to 212 columns) (lldata)
+def get_read_error_count(es, cluster, disk, at):
+    """
+    Count the number of reported read errors in the logs for a given
+    disk before at.
+    """
+    s = Search(using=es, index=ES_SYSLOG_INDEX)\
+        .query(Q('term', event_type="raid.read.media.err"))
+
+    s = filter_by_cluster_disk(windowed_query(s, end=at),
+                               cluster_name=cluster,
+                               disk_location=disk)
+
+    s.params(search_type="count")
+
+    return s.execute().to_dict()['hits']['total']
+
+
+def get_ll_data(es, cluster, disk, at):
+    """
+    Return the closest match for low-level data for a given disk near a
+    date at.
+    """
+    log.info("Getting low-level data for %s %s close to %s",
+             cluster, disk, str(at))
+    s = Search(using=es, index=ES_LOWLEVEL_INDEX)
+    s = filter_by_cluster_disk(s, cluster_name=cluster,
+                               disk_location=disk)
+    s.filter("range", **{"@timestamp": {'lte': at}})\
+     .sort({"@timestamp": {"order": "desc"}})
+
+    # Only get the first result
+    s = s[0]
+
+    for r in s.scan():
+        return r.to_dict()
+    raise ValueError
+
+
+def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
+    # FIXME: do this async!
+    bad_blocks = get_disk_bad_blocks(es, cluster, disk, start, end)
+    try:
+        bad_block_stdev = statistics.stdev(bad_blocks)
+    except statistics.StatisticsError:
+        bad_block_stdev = -1
+
+    trouble_count = len(list(troubles(es, cluster, disk,
+                                      before=end, after=start)))
+
+    read_errors = get_read_error_count(es, cluster, disk, end)
+
+
+    disk_data = get_ll_data(es, cluster, disk, at=end)
+    if disk_data['smart']:
+        smart_values = [x[1] for x in sorted(disk_data['smart'].items())]
+        log.error("SMART data length was: %d", len(smart_values))
+    else:
+        smart_values = [-1] * SMART_LENGTH
+    smart_mystery = list(disk_data['smart_mystery']) if \
+                    disk_data['smart_mystery'] \
+                    else [-1] * SMART_MYSTERY_LENGTH
+    io_completions = disk_data['io_completions']
+    io_completion_times = disk_data['io_completion_times']
+    sense_1_5 = [disk_data['sense_data{}'.format(x)] for x in range(1,6)]
+
+
+
+    # Sanity-checks:
+    assert len(io_completions) == 5
+    assert len(io_completion_times) == 16
+    assert len(smart_mystery) == SMART_MYSTERY_LENGTH
+    assert len(smart_values) == SMART_LENGTH
+    assert isinstance(trouble_count, int)
+    assert isinstance(read_errors, int)
+    assert isinstance(bad_block_stdev, int)
+
     #   - min, max, delta for:
-    #     - number of IO completions (len 5) (lldata)
-    #     - io_completion_times (len 16) (lldata)
     #     - retry_count (lldata)
-    #     - avg_io (lldata)
-    #     - max_io (lldata)
     #     - timeout_count (lldata)
-    #     - sense_data1-9+B (lldata)
-    return []
+    return [len(bad_blocks),
+            bad_block_stdev,
+            trouble_count,
+            read_errors,
+            #*smart_values,
+            #*smart_mystery,
+            *io_completions,
+            *io_completion_times,
+            *sense_1_5,
+            disk_data['sense_data9'],
+            disk_data['sense_dataB'],
+            disk_data['avg_io'],
+            disk_data['max_io'],
+            disk_data['retry_count'],
+            disk_data['timeout_count'],
+    ]
 
 
 def normalise_type(disk_type_str):
@@ -797,17 +886,24 @@ def prepare_training_data(es):
     for disk in disks:
         is_broken = 0 if disk['broke_at'] is None else 1
         disk_label = disk['disk_location']
+        cluster = disk['cluster_name']
 
         # Fixme: handle disks failing twice!
         window_end = UTC_NOW if not disk['broke_at'] else min(disk['broke_at'])
+        window_start_dates = [window_end - dur for dur in
+                              [timedelta(hours=12),
+                               timedelta(hours=48), ONE_WEEK]]
 
-        twelve_h, fourtyeight_h, week = map(
-            lambda t: window_disk_data(es, disk_label, start=t, end=window_end),
-            [UTC_NOW - dur for dur in [timedelta(hours=12),
-                                       timedelta(hours=48), ONE_WEEK]])
 
-        all_time = window_disk_data(es, disk_label)
+        try:
+            twelve_h, fourtyeight_h, week = map(
+                lambda t: window_disk_data(es, cluster, disk_label, start=t,
+                                           end=window_end), window_start_dates)
 
+            all_time = window_disk_data(es, cluster, disk_label)
+        except Exception as e:
+            log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
+                      e, cluster, disk_label)
 
         yield [is_broken, disk['type'],
                disk['c_broken_count'],
@@ -829,8 +925,13 @@ def make_report(es, args):
 
 
 def make_training_data(es, args):
-    for row in prepare_training_data(es):
-        print(row)
+    window_headings = ["{}[BB\tStd BB\t Trbl\t Rerrs]".format(w)
+                       for w in ["12h", "48h", "w", "inf"]]
+    heading = "Broken\tType\tClst\t{}".format("\t".join(window_headings))
+    for i, row in enumerate(prepare_training_data(es)):
+        if i % 10 == 0:
+            print(heading)
+        print("\t".join([str(x) for x in row]))
 
 
 def make_disk_report(es, args):
