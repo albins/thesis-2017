@@ -9,6 +9,7 @@ import sys
 import logging
 import argparse
 import statistics
+import csv
 
 import pytz
 import regex
@@ -89,8 +90,9 @@ DISK_FAIL_Q = " OR ".join(["event_type: {}".format(e) for e in FAIL_REASONS])
 SCRUB_TIME_Q = "tags: Disk_Scrub_Complete AND scrub_seconds: *"
 TYPE_TO_NUMBER = {'ssd': 1, 'fsas': 2, 'bsas': 3}
 NUMBER_TO_TYPE = {v: k for k, v in TYPE_TO_NUMBER.items()}
-SMART_LENGTH = 16
+SMART_LENGTH = 17
 SMART_MYSTERY_LENGTH = 212
+SMART_WORST_IDX = 3
 
 def windowed_query(s, start=None, end=UTC_NOW):
     time_range = {'gte': start} if start else {}
@@ -771,7 +773,7 @@ def get_ll_data(es, cluster, disk, at):
     Return the closest match for low-level data for a given disk near a
     date at.
     """
-    log.info("Getting low-level data for %s %s close to %s",
+    log.debug("Getting low-level data for %s %s close to %s",
              cluster, disk, str(at))
     s = Search(using=es, index=ES_LOWLEVEL_INDEX)
     s = filter_by_cluster_disk(s, cluster_name=cluster,
@@ -800,11 +802,12 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
 
     read_errors = get_read_error_count(es, cluster, disk, end)
 
-
-    disk_data = get_ll_data(es, cluster, disk, at=end)
+    at = start if start else end
+    disk_data = get_ll_data(es, cluster, disk, at=at)
     if disk_data['smart']:
-        smart_values = [x[1] for x in sorted(disk_data['smart'].items())]
-        log.error("SMART data length was: %d", len(smart_values))
+        smart_values = [x[1][SMART_WORST_IDX]
+                        for x in sorted(disk_data['smart'].items())]
+        log.info("SMART data length was: %d", len(smart_values))
     else:
         smart_values = [-1] * SMART_LENGTH
     smart_mystery = list(disk_data['smart_mystery']) if \
@@ -818,7 +821,7 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
 
     # Sanity-checks:
     assert len(io_completions) == 5
-    assert len(io_completion_times) == 16
+    #assert len(io_completion_times) == 16 # Apparently broken. Investigate.
     assert len(smart_mystery) == SMART_MYSTERY_LENGTH
     assert len(smart_values) == SMART_LENGTH
     assert isinstance(trouble_count, int)
@@ -832,10 +835,10 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
             bad_block_stdev,
             trouble_count,
             read_errors,
-            #*smart_values,
-            #*smart_mystery,
+            *smart_values,
+            *smart_mystery,
             *io_completions,
-            *io_completion_times,
+            #*io_completion_times,
             *sense_1_5,
             disk_data['sense_data9'],
             disk_data['sense_dataB'],
@@ -893,6 +896,8 @@ def prepare_training_data(es):
         window_start_dates = [window_end - dur for dur in
                               [timedelta(hours=12),
                                timedelta(hours=48), ONE_WEEK]]
+        log.debug("Window start dates are: %s",
+                  ", ".join([str(x) for x in window_start_dates]))
 
 
         try:
@@ -903,7 +908,8 @@ def prepare_training_data(es):
             all_time = window_disk_data(es, cluster, disk_label)
         except Exception as e:
             log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
-                      e, cluster, disk_label)
+                      str(e), cluster, disk_label)
+            continue
 
         yield [is_broken, disk['type'],
                disk['c_broken_count'],
@@ -925,13 +931,41 @@ def make_report(es, args):
 
 
 def make_training_data(es, args):
-    window_headings = ["{}[BB\tStd BB\t Trbl\t Rerrs]".format(w)
-                       for w in ["12h", "48h", "w", "inf"]]
-    heading = "Broken\tType\tClst\t{}".format("\t".join(window_headings))
-    for i, row in enumerate(prepare_training_data(es)):
-        if i % 10 == 0:
-            print(heading)
-        print("\t".join([str(x) for x in row]))
+    window_sizes = ["12h", "48h", "1w", "forever"]
+    values_in_window = ["bad_block_count",
+                        "bad_block_stdev",
+                        "trouble_log_count",
+                        "read_error_count",
+                        *["smart_value_%d" % i for i in
+                          range(1,SMART_LENGTH+1)],
+                        *["smart_mystery_%d" % i for i in
+                          range(1,SMART_MYSTERY_LENGTH+1)],
+                        "cpio_blocks_read",
+                        "blocks_read",
+                        "blocks_written",
+                        "verifies",
+                        "max_q",
+                        *["sense_%d" % i for i in range (1,6)],
+                        "sense_9",
+                        "sense_b",
+                        "avg_io",
+                        "max_io",
+                        "retry_count",
+                        "timeout_count",
+    ]
+    window_field_names = sum([["{}_{}".format(w, heading) for heading in
+                               values_in_window] for w in window_sizes], [])
+    fieldnames = ['is_broken', 'cluster_broken_count',
+                  'disk_type', *window_field_names]
+    log.info("Using field names %s",
+             ", ".join(fieldnames))
+    with args.writefile as csvfile:
+        writer = csv.writer(csvfile,
+                                delimiter=';',
+                                quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(fieldnames)
+        for row in prepare_training_data(es):
+            writer.writerow(row)
 
 
 def make_disk_report(es, args):
@@ -966,6 +1000,8 @@ if __name__ == '__main__':
 
     parser_training = subparsers.add_parser('training',
                                             help="Generate training data")
+    parser_training.add_argument('-w','--writefile', type=argparse.FileType('w'), default='-')
+
     parser_training.set_defaults(func=make_training_data)
 
     parser_disk_report = subparsers.add_parser('disk',
