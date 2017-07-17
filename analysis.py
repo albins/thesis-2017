@@ -107,6 +107,9 @@ SMART_LENGTH = len(SMART_FIELDS)
 SMART_MYSTERY_LENGTH = 212
 SMART_RAW_IDX = 3
 
+def flatten(lst):
+    return sum(lst, [])
+
 def windowed_query(s, start=None, end=UTC_NOW):
     time_range = {'gte': start} if start else {}
     time_range['lte'] = end
@@ -825,7 +828,7 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
                         field in SMART_FIELDS]
     else:
         smart_values = [-1] * SMART_LENGTH
-    smart_mystery = list(disk_data['smart_mystery']) if \
+    smart_mystery = flatten(disk_data['smart_mystery']) if \
                     disk_data['smart_mystery'] \
                     else [-1] * SMART_MYSTERY_LENGTH
     io_completions = disk_data['io_completions']
@@ -980,8 +983,8 @@ def make_training_data(es, args):
                         "retry_count",
                         "timeout_count",
     ]
-    window_field_names = sum([["{}_{}".format(w, heading) for heading in
-                               values_in_window] for w in window_sizes], [])
+    window_field_names = flatten([["{}_{}".format(w, heading) for heading in
+                                   values_in_window] for w in window_sizes])
     fieldnames = ['is_broken', 'cluster_broken_count',
                   'disk_type', *window_field_names]
     log.info("Using field names %s",
