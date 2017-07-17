@@ -93,7 +93,7 @@ TYPE_TO_NUMBER = {'ssd': 1, 'fsas': 2, 'bsas': 3}
 NUMBER_TO_TYPE = {v: k for k, v in TYPE_TO_NUMBER.items()}
 SMART_LENGTH = 17
 SMART_MYSTERY_LENGTH = 212
-SMART_WORST_IDX = 3
+SMART_RAW_IDX = 3
 
 def windowed_query(s, start=None, end=UTC_NOW):
     time_range = {'gte': start} if start else {}
@@ -806,7 +806,9 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     at = start if start else end
     disk_data = get_ll_data(es, cluster, disk, at=at)
     if disk_data['smart']:
-        smart_values = [x[1][SMART_WORST_IDX]
+        log.info("Disk had smart values for %s",
+                 ", ".join(disk_data['smart'].keys()))
+        smart_values = [x[1][SMART_RAW_IDX]
                         for x in sorted(disk_data['smart'].items())]
     else:
         smart_values = [-1] * SMART_LENGTH
