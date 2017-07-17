@@ -74,6 +74,7 @@ HARD_FAILURE_INDICATORS = ["raid.fdr.reminder",
 
 ONE_WEEK = timedelta(hours=7*24)
 UTC_NOW =  datetime.fromtimestamp(time.time(), tz=pytz.utc)
+TIME_BEFORE_FAILURE = timedelta(hours=10)
 
 Q_TROUBLE_EVENTS = Q("bool", should=[*[Q('match', event_type=t)
                                        for t in TROUBLE_REASONS],
@@ -807,7 +808,6 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     if disk_data['smart']:
         smart_values = [x[1][SMART_WORST_IDX]
                         for x in sorted(disk_data['smart'].items())]
-        log.info("SMART data length was: %d", len(smart_values))
     else:
         smart_values = [-1] * SMART_LENGTH
     smart_mystery = list(disk_data['smart_mystery']) if \
@@ -820,13 +820,19 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
 
 
     # Sanity-checks:
-    assert len(io_completions) == 5
+    assert len(io_completions) == 5, \
+        "io_completions had length {}, should be 5".format(len(io_completions))
     #assert len(io_completion_times) == 16 # Apparently broken. Investigate.
-    assert len(smart_mystery) == SMART_MYSTERY_LENGTH
-    assert len(smart_values) == SMART_LENGTH
-    assert isinstance(trouble_count, int)
-    assert isinstance(read_errors, int)
-    assert isinstance(bad_block_stdev, int)
+    assert len(smart_mystery) == SMART_MYSTERY_LENGTH, \
+        "smart mystery had length {}, should be {}".format(
+            len(smart_mystery), SMART_MYSTERY_LENGTH)
+    assert len(smart_values) == SMART_LENGTH, \
+        "SMART values had length {}, expected {}".format(
+            len(smart_values), SMART_LENGTH)
+    assert isinstance(trouble_count, int), \
+        "trouble_count should be int, was {}".format(type(trouble_count))
+    assert isinstance(read_errors, int), \
+        "read_errors should be int, was {}".format(type(read_errors))
 
     #   - min, max, delta for:
     #     - retry_count (lldata)
@@ -892,7 +898,12 @@ def prepare_training_data(es):
         cluster = disk['cluster_name']
 
         # Fixme: handle disks failing twice!
-        window_end = UTC_NOW if not disk['broke_at'] else min(disk['broke_at'])
+        if disk['broke_at']:
+            first_breakage = min(disk['broke_at'])
+            window_end = first_breakage - TIME_BEFORE_FAILURE
+        else:
+            window_end = UTC_NOW
+
         window_start_dates = [window_end - dur for dur in
                               [timedelta(hours=12),
                                timedelta(hours=48), ONE_WEEK]]
