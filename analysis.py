@@ -805,6 +805,29 @@ def get_ll_data(es, cluster, disk, at):
     raise ValueError
 
 
+def normalise_smart_values(disk_data):
+    if disk_data['smart']:
+        log.debug("Disk had smart values for %s",
+                  ", ".join(sorted(disk_data['smart'].keys())))
+
+        smart_values = []
+        for field in SMART_FIELDS:
+            try:
+                raw_data = disk_data['smart'][str(field)][SMART_RAW_IDX]
+            except KeyError:
+                log.info("No such SMART field %d", field)
+                raw_data = -1
+            except IndexError:
+                log.info("No RAW data for SMART field %d", field)
+                raw_data = -1
+            log.debug("SMART field %d was %d", field, raw_data)
+            smart_values.append(raw_data)
+        return smart_values
+
+    else:
+        return [-1] * SMART_LENGTH
+
+
 def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     # FIXME: do this async!
     bad_blocks = get_disk_bad_blocks(es, cluster, disk, start, end)
@@ -820,14 +843,7 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
 
     at = start if start else end
     disk_data = get_ll_data(es, cluster, disk, at=at)
-    if disk_data['smart']:
-        log.info("Disk had smart values for %s",
-                 ", ".join(sorted(disk_data['smart'].keys())))
-        smart_values = [disk_data['smart'].get(
-            str(field), [-1]*SMART_RAW_IDX)[SMART_RAW_IDX] for
-                        field in SMART_FIELDS]
-    else:
-        smart_values = [-1] * SMART_LENGTH
+    smart_values = normalise_smart_values(disk_data)
     smart_mystery = flatten(disk_data['smart_mystery']) if \
                     disk_data['smart_mystery'] \
                     else [-1] * SMART_MYSTERY_LENGTH
