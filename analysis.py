@@ -91,7 +91,19 @@ DISK_FAIL_Q = " OR ".join(["event_type: {}".format(e) for e in FAIL_REASONS])
 SCRUB_TIME_Q = "tags: Disk_Scrub_Complete AND scrub_seconds: *"
 TYPE_TO_NUMBER = {'ssd': 1, 'fsas': 2, 'bsas': 3}
 NUMBER_TO_TYPE = {v: k for k, v in TYPE_TO_NUMBER.items()}
-SMART_LENGTH = 17
+SMART_FIELDS = [ # from zhu, 2013
+    1,
+    3,
+    5,
+    7,
+    9,
+    187,
+    189,
+    194,
+    195,
+    197,
+]
+SMART_LENGTH = len(SMART_FIELDS)
 SMART_MYSTERY_LENGTH = 212
 SMART_RAW_IDX = 3
 
@@ -807,9 +819,10 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     disk_data = get_ll_data(es, cluster, disk, at=at)
     if disk_data['smart']:
         log.info("Disk had smart values for %s",
-                 ", ".join(disk_data['smart'].keys()))
-        smart_values = [x[1][SMART_RAW_IDX]
-                        for x in sorted(disk_data['smart'].items())]
+                 ", ".join(sorted(disk_data['smart'].keys())))
+        smart_values = [disk_data['smart'].get(
+            str(field), [-1]*SMART_RAW_IDX)[SMART_RAW_IDX] for
+                        field in SMART_FIELDS]
     else:
         smart_values = [-1] * SMART_LENGTH
     smart_mystery = list(disk_data['smart_mystery']) if \
@@ -826,8 +839,10 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
         "io_completions had length {}, should be 5".format(len(io_completions))
     #assert len(io_completion_times) == 16 # Apparently broken. Investigate.
     assert len(smart_mystery) == SMART_MYSTERY_LENGTH, \
-        "smart mystery had length {}, should be {}".format(
-            len(smart_mystery), SMART_MYSTERY_LENGTH)
+        "smart mystery had length {}, vals {}, should be {}".format(
+            len(smart_mystery),
+            ", ".join([str(x) for x in smart_mystery]),
+            SMART_MYSTERY_LENGTH)
     assert len(smart_values) == SMART_LENGTH, \
         "SMART values had length {}, expected {}".format(
             len(smart_values), SMART_LENGTH)
@@ -949,8 +964,7 @@ def make_training_data(es, args):
                         "bad_block_stdev",
                         "trouble_log_count",
                         "read_error_count",
-                        *["smart_value_%d" % i for i in
-                          range(1,SMART_LENGTH+1)],
+                        *["smart_raw_%d" % f for f in SMART_FIELDS],
                         *["smart_mystery_%d" % i for i in
                           range(1,SMART_MYSTERY_LENGTH+1)],
                         "cpio_blocks_read",
