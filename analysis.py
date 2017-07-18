@@ -103,8 +103,13 @@ SMART_FIELDS = [ # from zhu, 2013
     195,
     197,
 ]
+SMART_MYSTERY_FIELDS_KEEP = [23, 24, 27, 28, 32, 43, 44, 45, 46, 47, 48,
+                             51, 52, 53, 54, 55, 56, 89, 90, 94]
+SENSE_FIELDS_KEEP = [1, 3]
+
 SMART_LENGTH = len(SMART_FIELDS)
 SMART_MYSTERY_LENGTH = 220
+SMART_MYSTERY_KEEP_LENGTH = len(SMART_MYSTERY_FIELDS_KEEP)
 SMART_RAW_IDX = 3
 
 def flatten(lst):
@@ -815,7 +820,7 @@ def normalise_smart_values(disk_data):
             try:
                 raw_data = disk_data['smart'][str(field)][SMART_RAW_IDX]
             except KeyError:
-                log.info("No such SMART field %d", field)
+                log.debug("No such SMART field %d", field)
                 raw_data = -1
             except IndexError:
                 log.info("No RAW data for SMART field %d", field)
@@ -844,12 +849,15 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     at = start if start else end
     disk_data = get_ll_data(es, cluster, disk, at=at)
     smart_values = normalise_smart_values(disk_data)
-    smart_mystery = flatten(disk_data['smart_mystery']) if \
-                    disk_data['smart_mystery'] \
-                    else [-1] * SMART_MYSTERY_LENGTH
+    smart_mystery_data = flatten(disk_data['smart_mystery']) if \
+                         disk_data['smart_mystery'] \
+                         else [-1] * SMART_MYSTERY_LENGTH
+    smart_mystery = []
+    for mystery_id in SMART_MYSTERY_FIELDS_KEEP:
+        smart_mystery.append(smart_mystery_data[mystery_id])
     io_completions = disk_data['io_completions']
     io_completion_times = disk_data['io_completion_times']
-    sense_1_5 = [disk_data['sense_data{}'.format(x)] for x in range(1,6)]
+    sense_fields = [disk_data['sense_data%s' % x] for x in SENSE_FIELDS_KEEP]
 
 
 
@@ -857,11 +865,11 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     assert len(io_completions) == 5, \
         "io_completions had length {}, should be 5".format(len(io_completions))
     #assert len(io_completion_times) == 16 # Apparently broken. Investigate.
-    assert len(smart_mystery) == SMART_MYSTERY_LENGTH, \
+    assert len(smart_mystery) == SMART_MYSTERY_KEEP_LENGTH, \
         "smart mystery had length {}, vals {}, should be {}".format(
             len(smart_mystery),
             ", ".join([str(x) for x in smart_mystery]),
-            SMART_MYSTERY_LENGTH)
+            SMART_MYSTERY_KEEP_LENGTH)
     assert len(smart_values) == SMART_LENGTH, \
         "SMART values had length {}, expected {}".format(
             len(smart_values), SMART_LENGTH)
@@ -881,9 +889,7 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
             *smart_mystery,
             *io_completions,
             #*io_completion_times,
-            *sense_1_5,
-            disk_data['sense_data9'],
-            disk_data['sense_dataB'],
+            *sense_fields,
             disk_data['avg_io'],
             disk_data['max_io'],
             disk_data['retry_count'],
@@ -984,16 +990,14 @@ def make_training_data(es, args):
                         "trouble_log_count",
                         "read_error_count",
                         *["smart_raw_%d" % f for f in SMART_FIELDS],
-                        *["smart_mystery_%d" % i for i in
-                          range(1,SMART_MYSTERY_LENGTH+1)],
+                        *["smart_mystery_%d" % f for f in
+                          SMART_MYSTERY_FIELDS_KEEP],
                         "cpio_blocks_read",
                         "blocks_read",
                         "blocks_written",
                         "verifies",
                         "max_q",
-                        *["sense_%d" % i for i in range (1,6)],
-                        "sense_9",
-                        "sense_b",
+                        *["sense_%d" % i for i in SENSE_FIELDS_KEEP],
                         "avg_io",
                         "max_io",
                         "retry_count",
