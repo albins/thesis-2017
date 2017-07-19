@@ -66,7 +66,6 @@ random.seed(93)
 
 def sample_dict(d, keep_portion=0.5):
     keys = list(d.keys())
-    random.shuffle(keys)
     total = len(keys)
     closest_sublen = math.ceil(total * keep_portion)
     selected_keys = keys[:closest_sublen]
@@ -97,6 +96,34 @@ def clean_line(line):
     return line[2:]
 
 
+def verify_training(clf, verification_set, expected_labels):
+    false_positives = 0
+    false_negatives = 0
+    true_positives = 0
+    true_negatives = 0
+
+    with timed(task_name="Verification"):
+        for prediction, expected in zip(clf.predict(verification_set),
+                                        expected_labels):
+            if prediction == expected:
+                if expected == -1:
+                    true_positives += 1
+                else:
+                    true_negatives += 1
+            else:
+                # print("Got {}, expected {}".format(prediction, expected))
+                if expected == -1:
+                    false_negatives += 1
+                else:
+                    false_positives += 1
+    #print("False positives: {}, false negatives: {}, true positives: {}, true negatives: {}"
+    #      .format(false_positives, false_negatives, true_positives, true_negatives))
+    tpr = true_positives/(true_positives + false_negatives)
+    far = false_positives / (true_negatives + false_positives)
+    #print("This means TPR {} with FAR {}".format(tpr, far))
+    return tpr, far, clf
+
+
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
             classifier=tree.DecisionTreeClassifier):
     time_record = []
@@ -118,39 +145,16 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
         clf = classifier()
         clf = clf.fit(training_set, labels)
 
-    false_positives = 0
-    false_negatives = 0
-    true_positives = 0
-    true_negatives = 0
-
-    with timed(task_name="Training", time_record=time_record, printer=print):
-        for prediction, expected in zip(clf.predict(verification_set),
-                                        expected_labels):
-            if prediction == expected:
-                if expected == -1:
-                    true_positives += 1
-                else:
-                    true_negatives += 1
-            else:
-                # print("Got {}, expected {}".format(prediction, expected))
-                if expected == -1:
-                    false_negatives += 1
-                else:
-                    false_positives += 1
-    print("False positives: {}, false negatives: {}, true positives: {}, true negatives: {}"
-          .format(false_positives, false_negatives, true_positives, true_negatives))
-    tpr = true_positives/(true_positives + false_negatives)
-    far = false_positives / (true_negatives + false_positives)
-    print("This means accuracy {} with FAR {}".format(tpr, far))
-    return tpr, far, clf
+    return verify_training(clf, verification_set, expected_labels)
 
 
-def generate_roc_graph(broken, ok):
-    target_file = "../Report/Graphs/roc_graph.tex"
+def generate_roc_graph(broken, ok,
+                       target_file="../Report/Graphs/roc_graph.tex",
+                       predict=predict):
     xs_and_ys = []
 
     for n in range(1, 76, 5):
-        xs_and_ys.append(calculate_roc_point(n, broken, ok))
+        xs_and_ys.append(calculate_roc_point(n, broken, ok, predict=predict))
 
     print(sorted(xs_and_ys))
     ys, xs, _vals = zip(*xs_and_ys)
@@ -165,14 +169,11 @@ def generate_roc_graph(broken, ok):
        f.write(TEX_POST_STUFF)
 
 
-def render_tree_pdf(broken, ok_disks, keep_nonbroken):
-    target_file = "../Report/Graphs/sample_tree.pdf"
-    tpr, far, t = predict(broken, ok_disks, keep_broken=0.75,
-                          keep_nonbroken=keep_nonbroken)
+def tree_as_pdf(t, target_file, feature_names, class_names):
     import pydotplus
     dot_data = tree.export_graphviz(t, out_file=None,
-                                    feature_names=FEATURE_LABELS,
-                                    class_names=CLASS_NAMES,
+                                    feature_names=feature_names,
+                                    class_names=class_names,
                                     rounded=True,
                                     filled=True,
                                     special_characters=True)
@@ -180,9 +181,16 @@ def render_tree_pdf(broken, ok_disks, keep_nonbroken):
     graph.write_pdf(target_file)
 
 
-def calculate_roc_point(n, broken, ok, classifier=tree.DecisionTreeClassifier):
+def render_tree_pdf(broken, ok_disks, keep_nonbroken):
+    target_file = "../Report/Graphs/sample_tree.pdf"
+    tpr, far, t = predict(broken, ok_disks, keep_broken=0.75,
+                          keep_nonbroken=keep_nonbroken)
+    tree_as_pdf(t, target_file, FEATURE_LABELS, CLASS_NAMES)
+
+
+def calculate_roc_point(n, broken, ok, classifier=tree.DecisionTreeClassifier,
+                        predict=predict):
     percentage = 0.01 * n
-    print(percentage)
     tpr, far, _tree = predict(broken, ok, keep_broken=0.75,
                               keep_nonbroken=percentage,
                               classifier=classifier)

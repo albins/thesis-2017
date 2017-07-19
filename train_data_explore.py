@@ -23,8 +23,17 @@ def summarise_dicts(ds):
             uniques[key].add(value)
     return uniques
 
+def feature_labels():
+    with open("../Data/training_data.csv") as f:
+        reader = DictReader(f,
+                            delimiter=';',
+                            quotechar='|',
+                            quoting=csv.QUOTE_MINIMAL)
+        return sorted(reader.fieldnames)
+
+
 def read_data():
-    with open("../Data/cleaned_training_data.csv") as f:
+    with open("../Data/training_data.csv") as f:
         reader = DictReader(f,
                             delimiter=';',
                             quotechar='|',
@@ -32,7 +41,7 @@ def read_data():
         rows = []
         for row in reader:
             new_row = OrderedDict()
-            for key, v in row.items():
+            for key, v in sorted(row.items()):
                 if "smart_mystery" in key and \
                    not any([rx.match(key) for rx in KEEP_RGEXES]):
                     print("Removing key {}".format(key))
