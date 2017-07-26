@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from parse_emails import format_counter
 from parse_smart_pages import count_disks
+import common
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -1025,43 +1026,39 @@ def make_disk_report(es, args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="")
-    parser.add_argument('--verbose', '-v', action='count', dest='verbose_count',
-                        default=0)
-    parser.add_argument('--timeout_s', '-t', nargs='?', dest='timeout',
-                        default=10,
-                        type=int, help="Database operation timeout in seconds")
-    parser.add_argument('--es_node', '-s', nargs='*', type=str,
-                        dest='es_nodes',
-                        help="Elasticsearch node to connect to",
-                        default=[ELASTIC_ADDRESS])
-
-    subparsers = parser.add_subparsers(title='operations',
-                                       help="valid operations")
-    parser_report = subparsers.add_parser('report',
-                                          help="Generate reports")
-
-    parser_report.add_argument('include', type=str, nargs='+',
-                               choices=["scrub", "bad_blocks",
-                                        "broken_disks", "correlation",
-                                        "prediction_stats"])
-
-    parser_report.set_defaults(func=make_report)
-
-    parser_training = subparsers.add_parser('training',
-                                            help="Generate training data")
-    parser_training.add_argument('-w','--writefile', type=argparse.FileType('w'), default='-')
-
-    parser_training.set_defaults(func=make_training_data)
-
-    parser_disk_report = subparsers.add_parser('disk',
-                                               help="Show history for a given disk")
-    parser_disk_report.add_argument('cluster', type=str)
-    parser_disk_report.add_argument('disk_location', type=str)
-    parser_disk_report.set_defaults(func=make_disk_report)
+    parser = common.make_es_base_parser()
+    common.add_subcommands(parent=parser,
+                           descriptions=[
+                               ('report',
+                                "Generate reports",
+                                [(['include'],
+                                  {'type': str,
+                                   'nargs':'+',
+                                   'choices':
+                                   ["scrub",
+                                    "bad_blocks",
+                                    "broken_disks",
+                                    "correlation",
+                                    "prediction_stats"]})],
+                                make_report),
+                               ('training',
+                                "Generate training data",
+                                [
+                                    (['-w','--writefile'],
+                                     {'type': argparse.FileType('w'),
+                                      'default': '-'}),
+                                ],
+                                make_training_data),
+                               ('disk',
+                                "Show history for a given disk",
+                                [
+                                    (['cluster'], {'type': str}),
+                                    (['disk_location'], {'type': str})
+                                ],
+                                make_disk_report)
+                           ])
 
     args = parser.parse_args()
-    log_level = (max(3 - args.verbose_count, 0) * 10)
-    log.setLevel(log_level)
+    common.set_log_level_from_args(args, log)
     es_conn = Elasticsearch(args.es_nodes, timeout=args.timeout)
     args.func(es=es_conn, args=args)

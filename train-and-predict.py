@@ -128,6 +128,14 @@ if __name__ == '__main__':
         print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
               .format(tpr, far, broken_p, ok_p))
 
+    elif task == "random_forest":
+        broken_p = int(sys.argv[2])
+        ok_p = int(sys.argv[3])
+        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
+                                  keep_nonbroken=ok_p/100,
+                                  classifier=RandomForestClassifier())
+        print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
+              .format(tpr, far, broken_p, ok_p))
     elif task == "tree":
         try:
             broken_p = int(sys.argv[2])

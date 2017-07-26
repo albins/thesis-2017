@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from common import timed, format_counter
 
 import mailbox
 import tempfile
@@ -67,16 +68,6 @@ TEX_HISTOGRAM = """
 def read_xml_string(element, *element_hierarchy):
     target = "/".join(element_hierarchy)
     return element.findtext(target, namespaces=NAMESPACES)
-
-
-@contextmanager
-def timed(task_name, time_record=[], printer=log.info):
-    start_time = time.clock()
-    yield
-    end_time = time.clock()
-    printer("Task {} ran in {:06.4f}s"
-             .format(task_name, end_time - start_time))
-    time_record.append(end_time - start_time)
 
 
 def read_gzipped_log(gzip_fn):
@@ -269,13 +260,6 @@ def parse_mail(mail):
 def is_signature(part):
     content_type = part.get('Content-Type').split(";")[0]
     return content_type == 'application/pkcs7-signature'
-
-
-def format_counter(counter):
-    return ", ".join(["{} ({})".format(k, c) for k, c in
-                      sorted(counter.items(),
-                             key=lambda tpl: tpl[1],
-                             reverse=True)])
 
 
 def analyse_data(results):
