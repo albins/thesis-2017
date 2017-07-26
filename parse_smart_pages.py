@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-from parse_emails import format_counter, timed
+import common
+from common import format_counter, timed
 
 import sys
 import regex
@@ -1179,9 +1180,14 @@ def profile_parser(data_directory):
 
 
 if __name__ == '__main__':
-    tasks = sys.argv[1:]
-    data_directory = sys.argv[1]
-    es = Elasticsearch([ELASTIC_ADDRESS])
+    parser = common.make_es_base_parser()
+    parser.add_argument('data_directory', type=str)
+    parser.add_argument('task', type=str, nargs='+')
+    args = parser.parse_args()
+    common.set_log_level_from_args(args, log)
+    es = Elasticsearch(args.es_nodes, timeout=args.timeout)
+    tasks = args.task
+    data_directory = args.data_directory
 
     if "incremental_es" in tasks:
         type_fw_index = disk_types_and_serials_from_path(data_directory)
