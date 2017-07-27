@@ -9,6 +9,9 @@ from statistics import median, mode
 from train_data_explore import read_data, feature_labels
 from parse_chinese_data import (sample_dict, verify_training,
                                 generate_roc_graph, tree_as_pdf)
+import common
+from common import sample_matrix
+
 import numpy as np
 from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
@@ -20,48 +23,28 @@ random.seed(42)
 time_logger = logging.getLogger('parse_emails')
 time_logger.setLevel(logging.WARNING)
 
-def sample_matrix(m, keep_portion=0.5):
-    height, _w = m.shape
-    closest_sublen = math.ceil(height * keep_portion)
-    m_as_list = m.tolist()
-    selected = m_as_list[:closest_sublen]
-    deselected = m_as_list[closest_sublen:]
-    return np.matrix(selected), np.matrix(deselected)
-
-
-def split_data(data):
-    broken, ok = [], []
-
-    for row in data:
-        columns = []
-        for k, v in sorted(row.items()):
-            if not k == 'is_broken':
-                columns.append(v)
-        if row['is_broken'] == 1:
-            broken.append(columns)
-        else:
-            ok.append(columns)
-    return np.matrix(broken), np.matrix(ok)
 
 
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
-            classifier=tree.DecisionTreeClassifier()):
+            classifier=tree.DecisionTreeClassifier):
     training_broken, witheld_broken = sample_matrix(broken,
                                                     keep_portion=keep_broken)
     training_ok, witheld_ok = sample_matrix(ok_disks,
                                             keep_portion=keep_nonbroken)
+
     training_set = np.append(training_ok, training_broken, axis=0)
     verification_set = np.append(witheld_broken, witheld_ok, axis=0)
 
     expected_labels = list((witheld_broken.shape[0] * [-1])
                            + (witheld_ok.shape[0] * [1]))
 
-
     labels = list((training_ok.shape[0] * [1])
                   + (training_broken.shape[0] * [-1]))
-    classifier = classifier.fit(training_set, labels)
 
-    return verify_training(classifier, verification_set, expected_labels)
+    c = classifier()
+    model = c.fit(training_set, labels)
+
+    return verify_training(model, verification_set, expected_labels)
 
 
 def find_best_training_proportion(broken, ok):
@@ -107,9 +90,12 @@ def find_best_training_proportion(broken, ok):
 if __name__ == '__main__':
     task = sys.argv[1]
 
-    disk_data = read_data()
-    random.shuffle(disk_data)
-    broken, ok = split_data(disk_data)
+    disk_data = common.disk_training_set()
+    ok, broken = common.split_disk_data(disk_data)
+    np.random.shuffle(ok)
+    np.random.shuffle(broken)
+    ok = common.remove_labels(ok)
+    broken = common.remove_labels(broken)
 
     if task == "best_settings":
         ok_p, broken_p = find_best_training_proportion(broken, ok)
@@ -118,8 +104,11 @@ if __name__ == '__main__':
         print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
               .format(tpr, far, broken_p, ok_p))
     elif task == "roc_graph":
-        generate_roc_graph(broken, ok, target_file="../Report/Graphs/roc_graph_disks.tex",
-                           predict=predict)
+        generate_roc_graph(broken, ok,
+                           target_file="../Report/Graphs/roc_graph_disks.tex",
+                           predict=predict,
+                           start_percentage=1,
+                           broken_percent=40)
     elif task == "predict":
         broken_p = int(sys.argv[2])
         ok_p = int(sys.argv[3])
@@ -133,7 +122,7 @@ if __name__ == '__main__':
         ok_p = int(sys.argv[3])
         tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
                                   keep_nonbroken=ok_p/100,
-                                  classifier=RandomForestClassifier())
+                                  classifier=RandomForestClassifier)
         print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
               .format(tpr, far, broken_p, ok_p))
     elif task == "tree":

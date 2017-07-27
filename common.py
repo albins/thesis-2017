@@ -2,6 +2,10 @@ import argparse
 from contextlib import contextmanager
 import time
 import logging
+import pandas
+import math
+
+import numpy as np
 
 log = logging.getLogger(__name__)
 
@@ -62,5 +66,78 @@ def timed(task_name, time_record=[], printer=log.info):
     yield
     end_time = time.clock()
     printer("Task {} ran in {:06.4f}s"
-             .format(task_name, end_time - start_time))
+            .format(task_name, end_time - start_time))
     time_record.append(end_time - start_time)
+
+
+def zhu_2013_normalise(dataset, start_column=1):
+    """
+    Normalise a dataset according to the formula in
+    Zhu, 2013.
+    """
+    max_features = dataset.max(0)
+    min_features = dataset.min(0)
+
+    def x_normal(x, column):
+        min_x = min_features[column]
+        max_x = max_features[column]
+        top = x - min_x
+        assert top != float('inf')
+        bottom = max_x - min_x
+        assert bottom != 0
+        return 2 * (top/bottom - 1)
+
+    for index, x in np.ndenumerate(dataset[:,start_column:]):
+        row_idx, column_idx = index
+        column_idx += start_column
+        normalised = x_normal(x, column_idx)
+        dataset[row_idx][column_idx] = normalised
+
+    return dataset
+
+
+def read_csv_w_labels(filename):
+    """
+    Returns an array of values and a list of labels
+    """
+    data = pandas.read_csv(filename,
+                           delimiter=";",
+                           quotechar="|",
+                           header="infer")
+    return data
+
+
+def disk_training_set():
+    data = read_csv_w_labels("../Data/training_data.csv")
+    matrix_data = data.as_matrix()
+    matrix_data = matrix_data[matrix_data[:,0].argsort()]
+    return matrix_data
+
+
+def disk_training_set_feature_labels():
+    data = read_csv_w_labels("../Data/training_data.csv")
+    return list(data.keys())
+
+
+def split_disk_data(disk_data):
+    """
+    Presumes that disk_data is sorted with non-broken to broken disks
+    and not normalised.
+    """
+
+    last_nonbroken_row = np.where(disk_data[:, 0]== 1.)[0][0]
+    nonbroken = disk_data[:last_nonbroken_row]
+    broken = disk_data[last_nonbroken_row:]
+    return nonbroken, broken
+
+
+def remove_labels(disk_data):
+    return disk_data[:,1:]
+
+
+def sample_matrix(m, keep_portion=0.5):
+    height, _w = m.shape
+    closest_sublen = math.ceil(height * keep_portion)
+    selected = m[:closest_sublen]
+    deselected = m[closest_sublen:]
+    return selected, deselected

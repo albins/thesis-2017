@@ -150,16 +150,19 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
 
 def generate_roc_graph(broken, ok,
                        target_file="../Report/Graphs/roc_graph.tex",
-                       predict=predict):
+                       predict=predict, start_percentage=1,
+                       stop_percentage=75,
+                       step_size=5,
+                       broken_percent=75):
     xs_and_ys = []
 
-    for n in range(1, 76, 5):
-        xs_and_ys.append(calculate_roc_point(n, broken, ok, predict=predict))
+    for n in range(start_percentage, stop_percentage + 1, step_size):
+        xs_and_ys.append(calculate_roc_point(n, broken, ok,
+                                             broken_percent=broken_percent,
+                                             predict=predict))
 
     print(sorted(xs_and_ys))
     ys, xs, _vals = zip(*xs_and_ys)
-    print(xs)
-    print(ys)
 
     with open(target_file, 'w') as f:
        f.write(TEX_PREAMBLE)
@@ -189,9 +192,9 @@ def render_tree_pdf(broken, ok_disks, keep_nonbroken):
 
 
 def calculate_roc_point(n, broken, ok, classifier=tree.DecisionTreeClassifier,
-                        predict=predict):
+                        predict=predict, broken_percent=75):
     percentage = 0.01 * n
-    tpr, far, _tree = predict(broken, ok, keep_broken=0.75,
+    tpr, far, _tree = predict(broken, ok, keep_broken=broken_percent/100,
                               keep_nonbroken=percentage,
                               classifier=classifier)
     return tpr, far, percentage

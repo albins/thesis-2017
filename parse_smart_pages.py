@@ -24,7 +24,7 @@ ch = logging.StreamHandler(sys.stderr)
 formatter = logging.Formatter('%(name)s %(levelname)s: %(message)s')
 ch.setFormatter(formatter)
 log.addHandler(ch)
-log.setLevel(logging.INFO)
+#log.setLevel(logging.INFO)
 
 elastic_logger = logging.getLogger('elasticsearch')
 elastic_logger.setLevel(logging.WARNING)
@@ -905,6 +905,7 @@ def prepare_es_data(cluster, parsed_data, type_fw_index):
             smart_data = node_data['smart_data'].get(disk_location, None)
             smart_mystery = node_data['smart_mystery'].get(disk_location, None)
             completions = node_data['io_completions'].get(disk_location)
+            assert completions
             fw_version, disk_type = get_closest_disk_data(type_fw_index,
                                                           cluster,
                                                           disk_location,
@@ -1182,7 +1183,11 @@ def profile_parser(data_directory):
 if __name__ == '__main__':
     parser = common.make_es_base_parser()
     parser.add_argument('data_directory', type=str)
-    parser.add_argument('task', type=str, nargs='+')
+    parser.add_argument('task', type=str, nargs='+',
+                        choices=["incremental_es",
+                                 "disks",
+                                 "smart_stats",
+                                 "profile_parse"])
     args = parser.parse_args()
     common.set_log_level_from_args(args, log)
     es = Elasticsearch(args.es_nodes, timeout=args.timeout)
