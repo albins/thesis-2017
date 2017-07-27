@@ -10,6 +10,22 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 ELASTIC_ADDRESS = "localhost:9200"
+ZHU_FEATURE_LABELS = [
+    "Disk ID",
+    "Is broken",
+    "Raw Read Error Rate",
+    "Spin Up Time",
+    "Reallocated Sectors Count",
+    "Seek Error Rate",
+    "Power On Hours",
+    "Reported Uncorrectable Errors",
+    "High Fly Writes",
+    "Temperature Celsius",
+    "Hardware ECC Recovered",
+    "Current Pending Sector Count",
+    "Reallocated Sectors Count RAW",
+    "Current Pending Sector Count RAW"
+]
 
 def add_elasticsearch_options(parser, default_address):
     parser.add_argument('--timeout_s', '-t', nargs='?', dest='timeout',
@@ -141,3 +157,21 @@ def sample_matrix(m, keep_portion=0.5):
     selected = m[:closest_sublen]
     deselected = m[closest_sublen:]
     return selected, deselected
+
+
+def read_zhu_2013_data(delete_serials=True):
+    data = pandas.read_csv("../Data/Disk_SMART_dataset.csv",
+                           delimiter=",",
+                           header=None,
+                           names=ZHU_FEATURE_LABELS)
+    if delete_serials:
+        del data['Disk ID']
+
+    return data
+
+
+def zhu_2013_training_set():
+    data = read_zhu_2013_data(delete_serials=True)
+    matrix_data = data.as_matrix()
+    matrix_data[matrix_data[:,0].argsort()]
+    return matrix_data
