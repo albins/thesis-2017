@@ -5,6 +5,7 @@ import itertools
 import logging
 import sys
 from statistics import median, mode
+import argparse
 
 from train_data_explore import read_data, feature_labels
 from parse_chinese_data import (sample_dict, verify_training,
@@ -15,6 +16,9 @@ from common import sample_matrix
 import numpy as np
 from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
+import daiquiri
+log = daiquiri.getLogger("train-and-predict")
+
 
 np.random.seed(42)
 random.seed(42)
@@ -22,7 +26,6 @@ random.seed(42)
 
 time_logger = logging.getLogger('parse_emails')
 time_logger.setLevel(logging.WARNING)
-
 
 
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
@@ -71,13 +74,13 @@ def find_best_training_proportion(broken, ok):
                 best_tpr_far = far
                 best_tpr = tpr
                 best_tpr_combination = ok_p, broken_p
-                print("New best TPR! {:.3f} OK% {} Broken% {} (FAR was {:.3f})"
+                log.info("New best TPR! {:.3f} OK% {} Broken% {} (FAR was {:.3f})"
                       .format(tpr, ok_p, broken_p, far))
 
         if far < best_far and tpr >= lowest_tolerable_tpr:
             best_far = far
             best_far_combination = ok_p, broken_p
-            print("New best FAR! {:.3f} OK% {} Broken% {} (TPR was {:.3f})"
+            log.info("New best FAR! {:.3f} OK% {} Broken% {} (TPR was {:.3f})"
                   .format(far, ok_p, broken_p, tpr))
 
     print("Best TPR was {:.2f}, with arguments ok/broken {}"
@@ -87,59 +90,98 @@ def find_best_training_proportion(broken, ok):
     return best_tpr_combination
 
 
-if __name__ == '__main__':
-    task = sys.argv[1]
+def best_settings(ok, broken, args):
+    ok_p, broken_p = find_best_training_proportion(broken, ok)
+    tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
+                              keep_nonbroken=ok_p/100)
+    print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
+          .format(tpr, far, broken_p, ok_p))
 
+
+def try_predict(ok, broken, args):
+    broken_p = args.percent_broken
+    ok_p = args.percent_ok
+    if not args.do_random_forest:
+        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
+                                  keep_nonbroken=ok_p/100)
+    else:
+        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
+                                  keep_nonbroken=ok_p/100,
+                                  classifier=RandomForestClassifier)
+    print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
+          .format(tpr, far, broken_p, ok_p))
+
+def make_tree(ok, broken, args):
+    broken_p = args.percent_broken
+    ok_p = args.percent_ok
+    tpr, far, t = predict(broken, ok, keep_broken=broken_p/100,
+                          keep_nonbroken=ok_p/100)
+
+    target_file = "../Report/Graphs/disks_tree.pdf"
+
+    labels = feature_labels()
+    labels.remove('is_broken')
+    tree_as_pdf(t, target_file, feature_names=labels,
+                class_names=["Failed", "OK"])
+    log.info("Rendered tree with TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
+             .format(tpr, far, broken_p, ok_p))
+
+def make_roc_graph(ok, broken, args):
+    generate_roc_graph(broken, ok,
+                       target_file="../Report/Graphs/roc_graph_disks.tex",
+                       predict=predict,
+                       start_percentage=1,
+                       broken_percent=41)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="")
+    common.setup_verbosity_flags(parser)
+    parser.add_argument("--normalise", "-n", action="store_true",
+                        help="normalise data before processing",
+                        dest="do_normalise", default=False)
+    common.add_subcommands(parent=parser,
+                           descriptions=[
+                               ('best_settings',
+                                "Determine the best settings",
+                                [],
+                                best_settings),
+                               ('predict',
+                                "Try predicting failures from the set",
+                                [
+                                    (['percent_broken'], {'type': int}),
+                                    (['percent_ok'], {'type': int}),
+                                    (['--random-forest', '-r'],
+                                     {'action': 'store_true',
+                                      'dest': "do_random_forest",
+                                      'help': "use a random forest",
+                                      'default': False}),
+                                ],
+                                try_predict),
+                               ('tree',
+                                "Generate a tree graph visualisation",
+                                [
+                                    (['percent_broken'], {'type': int}),
+                                    (['percent_ok'], {'type': int}),
+                                ],
+                                make_tree),
+                               ('roc_graph',
+                                "Generate a ROC graph",
+                                [],
+                                make_roc_graph)
+                               ])
+
+    args = parser.parse_args()
+    daiquiri.setup()
+    common.set_log_level_from_args(args, log)
     disk_data = common.disk_training_set()
+    if args.do_normalise:
+        disk_data = common.zhu_2013_normalise(disk_data)
+
     ok, broken = common.split_disk_data(disk_data)
     np.random.shuffle(ok)
     np.random.shuffle(broken)
     ok = common.remove_labels(ok)
     broken = common.remove_labels(broken)
 
-    if task == "best_settings":
-        ok_p, broken_p = find_best_training_proportion(broken, ok)
-        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
-                                  keep_nonbroken=ok_p/100)
-        print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
-              .format(tpr, far, broken_p, ok_p))
-    elif task == "roc_graph":
-        generate_roc_graph(broken, ok,
-                           target_file="../Report/Graphs/roc_graph_disks.tex",
-                           predict=predict,
-                           start_percentage=1,
-                           broken_percent=40)
-    elif task == "predict":
-        broken_p = int(sys.argv[2])
-        ok_p = int(sys.argv[3])
-        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
-                                  keep_nonbroken=ok_p/100)
-        print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
-              .format(tpr, far, broken_p, ok_p))
-
-    elif task == "random_forest":
-        broken_p = int(sys.argv[2])
-        ok_p = int(sys.argv[3])
-        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
-                                  keep_nonbroken=ok_p/100,
-                                  classifier=RandomForestClassifier)
-        print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
-              .format(tpr, far, broken_p, ok_p))
-    elif task == "tree":
-        try:
-            broken_p = int(sys.argv[2])
-            ok_p = int(sys.argv[3])
-        except (IndexError, ValueError):
-            broken_p = 67
-            ok_p = 1
-        tpr, far, t = predict(broken, ok, keep_broken=broken_p/100,
-                                keep_nonbroken=ok_p/100)
-
-        target_file = "../Report/Graphs/disks_tree.pdf"
-
-        labels = feature_labels()
-        labels.remove('is_broken')
-        tree_as_pdf(t, target_file, feature_names=labels,
-                    class_names=["Failed", "OK"])
-        print("Rendered tree with TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
-              .format(tpr, far, broken_p, ok_p))
+    args.func(ok=ok, broken=broken, args=args)
