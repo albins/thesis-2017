@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
+import common
+
 import csv
 import random
 import math
 import sys
+import logging
 
 from collections import defaultdict
 from parse_emails import timed
@@ -11,6 +14,8 @@ import numpy as np
 from sklearn import tree
 # from sklearn.ensemble import RandomForestClassifier
 # import matplotlib.pyplot as plt
+
+log = logging.getLogger(__name__)
 
 
 FILENAME = "../Data/Disk_SMART_dataset.csv"
@@ -102,25 +107,35 @@ def verify_training(clf, verification_set, expected_labels):
     true_positives = 0
     true_negatives = 0
 
-    with timed(task_name="Verification"):
+    with timed(task_name="verification"):
         for prediction, expected in zip(clf.predict(verification_set),
                                         expected_labels):
             if prediction == expected:
-                if expected == -1:
+                log.debug("Found correct prediction of %s",
+                          common.NUM_TO_PREDICTION[prediction])
+                if expected == common.PREDICT_FAIL:
                     true_positives += 1
                 else:
                     true_negatives += 1
             else:
-                # print("Got {}, expected {}".format(prediction, expected))
-                if expected == -1:
+                log.debug("Found misprediction, got %s expected %s",
+                          common.NUM_TO_PREDICTION[prediction],
+                          common.NUM_TO_PREDICTION[expected])
+                if expected == common.PREDICT_FAIL:
                     false_negatives += 1
                 else:
                     false_positives += 1
-    #print("False positives: {}, false negatives: {}, true positives: {}, true negatives: {}"
-    #      .format(false_positives, false_negatives, true_positives, true_negatives))
-    tpr = true_positives/(true_positives + false_negatives)
-    far = false_positives / (true_negatives + false_positives)
-    #print("This means TPR {} with FAR {}".format(tpr, far))
+
+    if true_positives + false_negatives == 0:
+        tpr = 0
+    else:
+        tpr = true_positives/(true_positives + false_negatives)
+    if true_negatives + false_positives == 0:
+        far = 1
+    else:
+        far = false_positives / (true_negatives + false_positives)
+    log.info("False positives: %d, false negatives: %d, true positives: %d, true negatives: %d",
+             false_positives, false_negatives, true_positives, true_negatives)
     return tpr, far, clf
 
 
@@ -157,6 +172,7 @@ def generate_roc_graph(broken, ok,
     xs_and_ys = []
 
     for n in range(start_percentage, stop_percentage + 1, step_size):
+        log.debug("Calculating ROC values for %d%%", n)
         xs_and_ys.append(calculate_roc_point(n, broken, ok,
                                              broken_percent=broken_percent,
                                              predict=predict))

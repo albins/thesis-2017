@@ -27,6 +27,10 @@ ZHU_FEATURE_LABELS = [
     "Current Pending Sector Count RAW"
 ]
 
+PREDICT_FAIL = -1
+PREDICT_OK = 1
+NUM_TO_PREDICTION = {1: "OK", -1: "FAIL"}
+
 def add_elasticsearch_options(parser, default_address):
     parser.add_argument('--timeout_s', '-t', nargs='?', dest='timeout',
                         default=10,
@@ -77,7 +81,7 @@ def format_counter(counter):
 
 
 @contextmanager
-def timed(task_name, time_record=[], printer=log.info):
+def timed(task_name, time_record=[], printer=log.debug):
     start_time = time.clock()
     yield
     end_time = time.clock()
@@ -175,3 +179,11 @@ def zhu_2013_training_set():
     matrix_data = data.as_matrix()
     matrix_data[matrix_data[:,0].argsort()]
     return matrix_data
+
+
+def random_training_set(count, features):
+    random_array = np.random.random(size=(count, features))
+    broken_or_ok_column = np.random.randint(0, 2, size=(count, 1))
+    training_data = np.append(broken_or_ok_column, random_array, 1)
+    training_data[training_data[:,0].argsort()]
+    return training_data

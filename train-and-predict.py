@@ -4,7 +4,7 @@ import math
 import itertools
 import logging
 import sys
-from statistics import median, mode
+from statistics import median, mode, stdev
 import argparse
 
 from parse_chinese_data import (sample_dict, verify_training,
@@ -16,19 +16,15 @@ import numpy as np
 from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
 import daiquiri
-log = daiquiri.getLogger("train-and-predict")
+log = daiquiri.getLogger()
 
 
 np.random.seed(42)
 random.seed(42)
 
 
-time_logger = logging.getLogger('parse_emails')
-time_logger.setLevel(logging.WARNING)
-
-
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
-            classifier=tree.DecisionTreeClassifier):
+            classifier=tree.DecisionTreeClassifier, nrounds=None):
     training_broken, witheld_broken = sample_matrix(broken,
                                                     keep_portion=keep_broken)
     training_ok, witheld_ok = sample_matrix(ok_disks,
@@ -36,35 +32,67 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
 
     training_set = np.append(training_ok, training_broken, axis=0)
     verification_set = np.append(witheld_broken, witheld_ok, axis=0)
+    log.debug("Training set size %dx%d (%d ok, %d broken)", *training_set.shape,
+             training_ok.shape[0], training_broken.shape[0])
+    log.debug("Verification set size %dx%d (%d ok, %d broken)",
+             *verification_set.shape,
+             witheld_ok.shape[0], witheld_broken.shape[0])
 
-    expected_labels = list((witheld_broken.shape[0] * [-1])
-                           + (witheld_ok.shape[0] * [1]))
+    expected_labels = list((witheld_broken.shape[0] * [common.PREDICT_FAIL])
+                           + (witheld_ok.shape[0] * [common.PREDICT_OK]))
 
-    labels = list((training_ok.shape[0] * [1])
-                  + (training_broken.shape[0] * [-1]))
+    labels = list((training_ok.shape[0] * [common.PREDICT_OK])
+                  + (training_broken.shape[0] * [common.PREDICT_FAIL]))
 
-    c = classifier()
-    model = c.fit(training_set, labels)
+    if not nrounds:
+        with common.timed(task_name="training"):
+            c = classifier(random_state=42)
+            model = c.fit(training_set, labels)
 
-    return verify_training(model, verification_set, expected_labels)
+            return verify_training(model, verification_set, expected_labels)
+    else:
+        results = []
+        for i in range(0, nrounds):
+            c = classifier(random_state=i)
+            model = c.fit(training_set, labels)
+            results.append(verify_training(model, verification_set,
+                                           expected_labels))
+        return results
 
 
-def find_best_training_proportion(broken, ok):
+def find_best_training_proportion(broken, ok, nrounds=1):
+
+    MIN_DATAPOINTS_BROKEN = 3
+
+    num_broken_drives, _ = broken.shape
+    num_ok_drives, _ = ok.shape
+
+    min_broken_percent = math.ceil(MIN_DATAPOINTS_BROKEN/num_broken_drives * 100)
+    max_broken_percent = math.floor(100 - MIN_DATAPOINTS_BROKEN/ \
+                                    num_broken_drives * 100)
+    log.info("Determined OK broken percent range is [%d, %d]",
+              min_broken_percent, max_broken_percent)
+
+    min_ok_percent = math.ceil(100/num_ok_drives)
+    log.info("Determined OK non-broken percent min is %d",
+             min_ok_percent)
+
     best_tpr = 0
     best_tpr_far = float("inf")
     best_far = float("inf")
     best_tpr_combination = None
     best_far_combination = None
-    keep_ok_p = range(1, 76, 1)
-    keep_broken_p = range(19, 76, 1)
+    keep_ok_p = range(min_ok_percent, 76, 10)
+    keep_broken_p = range(min_broken_percent, max_broken_percent + 1, 10)
 
     highest_tolerable_far = 0.1
     lowest_tolerable_tpr = 0.5
 
     for ok_p, broken_p in itertools.product(keep_ok_p, keep_broken_p):
         log.debug("Testing %d%% ok, %d%% broken data", ok_p, broken_p)
-        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
-                                  keep_nonbroken=ok_p/100)
+        tpr, far, _tree = sorted(predict(broken, ok, keep_broken=broken_p/100,
+                                         keep_nonbroken=ok_p/100, nrounds=nrounds),
+                                 key=lambda tup: tup[0])[0]
         if far <= 0.001 or tpr >= 0.999:
             # Ignoring perfect outcome
             continue
@@ -91,7 +119,7 @@ def find_best_training_proportion(broken, ok):
 
 
 def best_settings(ok, broken, args):
-    ok_p, broken_p = find_best_training_proportion(broken, ok)
+    ok_p, broken_p = find_best_training_proportion(broken, ok, args.nrounds)
     tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
                               keep_nonbroken=ok_p/100)
     print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
@@ -103,22 +131,50 @@ def try_predict(ok, broken, args):
     ok_p = args.percent_ok
     if not args.do_random_forest:
         log.debug("Using normal classification tree")
-        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
-                                  keep_nonbroken=ok_p/100)
+        if not args.nrounds:
+            tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
+                                      keep_nonbroken=ok_p/100)
+        else:
+            results = predict(broken, ok, keep_broken=broken_p/100,
+                              keep_nonbroken=ok_p/100, nrounds=args.nrounds)
+
     else:
         log.debug("Using random forest")
         tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
                                   keep_nonbroken=ok_p/100,
                                   classifier=RandomForestClassifier)
-    print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
-          .format(tpr, far, broken_p, ok_p))
+    if args.nrounds and not args.do_random_forest:
+        tprs = [x[0] for x in results]
+        fars = [x[1] for x in results]
+
+        def int_mode(xs):
+            return mode([int(x * 100)/100 for x in tprs])
+
+        print("Result: TPR: [{}, {}] (stdev={}, mode={}, median={}), FAR [{}, {}] (stedv={}, mode={}, median={}) at mix {}% from failed set, {}% from OK set"
+                  .format(min(tprs), max(tprs), stdev(tprs), int_mode(tprs), median(tprs),
+                          min(fars),  max(fars), stdev(tprs), int_mode(tprs), median(tprs),
+                          broken_p, ok_p))
+    else:
+        print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
+              .format(tpr, far, broken_p, ok_p))
 
 
 def make_tree(ok, broken, args):
     broken_p = args.percent_broken
     ok_p = args.percent_ok
-    tpr, far, t = predict(broken, ok, keep_broken=broken_p/100,
-                          keep_nonbroken=ok_p/100)
+    if args.nrounds:
+        results = predict(broken, ok, keep_broken=broken_p/100,
+                                 keep_nonbroken=ok_p/100, nrounds=args.nrounds)
+        # Sort on highest TPR, then lowest FAR:
+        results.sort(key=lambda tup: tup[1])
+        results.sort(reverse=True,
+                     key=lambda tup: tup[0])
+
+        # Largest TPR first
+        tpr, far, t = results[0]
+    else:
+        tpr, far, t = predict(broken, ok, keep_broken=broken_p/100,
+                              keep_nonbroken=ok_p/100)
 
     target_file = args.writefile
 
@@ -143,6 +199,16 @@ def make_kmeans_graph(ok, broken, args):
     from sklearn.decomposition import PCA
 
     all_data = np.append(ok, broken, axis=0)
+
+    if args.use_at_most:
+        use_at_most = min(args.use_at_most, all_data.shape[0])
+    else:
+        use_at_most = all_data.shape[0]
+
+    if use_at_most < all_data.shape[0]:
+        log.debug("Limiting data set to %d entries", use_at_most)
+        np.random.shuffle(all_data)
+        all_data = all_data[:use_at_most]
 
     from matplotlib.backends.backend_pdf import PdfPages
     pp = PdfPages(args.writefile)
@@ -187,17 +253,26 @@ if __name__ == '__main__':
     parser.add_argument("--normalise", "-n", action="store_true",
                         help="normalise data before processing",
                         dest="do_normalise", default=False)
+    parser.add_argument("--as-is", "-a", action="store_true",
+                        help="disable shuffling and use data as-is",
+                        dest="dont_shuffle", default=False)
     parser.add_argument("--dataset", "-d",
                         dest="use_dataset",
                         type=str,
                         help="use this dataset",
                         default="cern_disks",
-                        choices=["cern_disks", "zhu_disks"])
+                        choices=["cern_disks", "zhu_disks", "random"])
     common.add_subcommands(parent=parser,
                            descriptions=[
                                ('best_settings',
                                 "Determine the best settings",
-                                [],
+                                [
+                                    (['-n','--nrounds'],
+                                     {'type': int,
+                                      'help': "Run n iterations in stead of one",
+                                      'dest': 'nrounds',
+                                      'default': 1}),
+                                ],
                                 best_settings),
                                ('predict',
                                 "Try predicting failures from the set",
@@ -209,6 +284,11 @@ if __name__ == '__main__':
                                       'dest': "do_random_forest",
                                       'help': "use a random forest",
                                       'default': False}),
+                                    (['-n','--nrounds'],
+                                     {'type': int,
+                                      'help': "Run n iterations in stead of one",
+                                      'dest': 'nrounds',
+                                      'default': None}),
                                 ],
                                 try_predict),
                                ('tree',
@@ -219,6 +299,11 @@ if __name__ == '__main__':
                                     (['-w','--writefile'],
                                      {'type': str,
                                       'default': '../Report/Graphs/disks_tree.pdf'}),
+                                    (['-n','--nrounds'],
+                                     {'type': int,
+                                      'help': "Run n iterations in stead of one",
+                                      'dest': 'nrounds',
+                                      'default': None}),
                                 ],
                                 make_tree),
                                ('roc_graph',
@@ -235,6 +320,10 @@ if __name__ == '__main__':
                                     (['-w','--writefile'],
                                      {'type': str,
                                       'default': '../Report/Graphs/kmeans-PCA-dataset.pdf'}),
+                                    (['-u','--use-at-most'],
+                                     {'type': int,
+                                      'dest': 'use_at_most',
+                                      'default': None}),
                                 ],
                                 make_kmeans_graph),
 
@@ -257,6 +346,11 @@ if __name__ == '__main__':
         args.feature_labels = common.ZHU_FEATURE_LABELS[2:]
         args.roc_start_p = 1
         args.roc_broken_p = 75
+    elif args.use_dataset == "random":
+        train_data = common.random_training_set(4000, 4)
+        args.feature_labels = ["random%d" %i for i in range(1, train_data.shape[1])]
+        args.roc_start_p = 1
+        args.roc_broken_p = 75
     else:
         print("That dataset is not supported yet")
         exit(1)
@@ -268,12 +362,15 @@ if __name__ == '__main__':
     log.info("Loaded dataset")
 
     if args.do_normalise:
+        log.debug("Normalising data...")
         train_data = common.zhu_2013_normalise(train_data)
+        log.debug("Done normalising data")
 
     ok, broken = common.split_disk_data(train_data)
     log.info("Split disk data")
-    np.random.shuffle(ok)
-    np.random.shuffle(broken)
+    if not args.dont_shuffle:
+        np.random.shuffle(ok)
+        np.random.shuffle(broken)
     ok = common.remove_labels(ok)
     broken = common.remove_labels(broken)
     log.info("Finished pre-processing data")
