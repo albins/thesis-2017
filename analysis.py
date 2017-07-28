@@ -18,8 +18,9 @@ from elasticsearch import Elasticsearch
 from elasticsearch_dsl import Search, Q, A
 from elasticsearch.helpers import scan
 import dateparser
+import daiquiri
 
-log = logging.getLogger()
+log = daiquiri.getLogger()
 
 #ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
 ELASTIC_ADDRESS = "localhost:9200"
@@ -448,16 +449,21 @@ def get_disk_type(es, cluster, disk):
     return result['type']
 
 
-def get_disk_bad_blocks(es, cluster_name, disk_name, start=None, end=UTC_NOW):
+def get_disk_bad_blocks(es, cluster_name, disk_name, start=None, end=UTC_NOW,
+                        with_ts=False):
     """
     Return a set of (bad_block_no) for a given disk.
     """
+    log.debug("Getting bad blocks for %s, %s between %s and %s",
+              cluster_name, disk_name, start, end)
     s = Search(using=es, index=ES_SYSLOG_INDEX)\
         .query(Q('wildcard', event_type="raid.rg.readerr.repair.*"))
 
     s = filter_by_cluster_disk(windowed_query(s, start=start, end=end),
                                cluster_name=cluster_name,
                                disk_location=disk_name)
+
+    block_error_times = defaultdict(lambda: UTC_NOW)
 
     bad_blocks = set()
     for msg in s.scan():
@@ -466,8 +472,14 @@ def get_disk_bad_blocks(es, cluster_name, disk_name, start=None, end=UTC_NOW):
         body = msg.to_dict()["body"]
         broken_block = get_broken_block(body)
         bad_blocks.add(broken_block)
+        ts = dateparser.parse(msg['@timestamp'])
+        if ts <= block_error_times[broken_block]:
+            block_error_times[broken_block] = ts
 
-    return bad_blocks
+    if not with_ts:
+        return bad_blocks
+    else:
+        return block_error_times
 
 
 def print_disk_report(data):
@@ -984,6 +996,78 @@ def make_report(es, args):
         print_prediction_stats(es)
 
 
+def make_bad_block_data_slice(es, disk, window_end):
+    window_start_dates = [window_end - dur for dur in
+                          [timedelta(hours=12),
+                               timedelta(hours=48), ONE_WEEK]]
+    disk_label = disk['disk_location']
+    cluster = disk['cluster_name']
+
+    log.debug("Window start dates are: %s",
+              ", ".join([str(x) for x in window_start_dates]))
+
+    twelve_h, fourtyeight_h, week = [window_disk_data(es, cluster, disk_label,
+                                                      start=t, end=window_end)
+                                     for t in window_start_dates]
+
+    all_time = window_disk_data(es, cluster, disk_label)
+
+
+    return [*twelve_h, *fourtyeight_h, *week, *all_time]
+
+
+def prepare_bad_block_training_data(es):
+    # for each cluster:
+    # - count of broken disks in cluster
+    #
+    # for each disk:
+    # if no bad blocks: broken = 0
+    # else, one snapshot per broken block, each broken = 1
+    # - type of disk (normalise to int)
+    # - for each window (12h, 48h, week, all time):
+    #   - read error count for drive
+    #   - number of bad blocks for drive
+    #   - standard deviation of bad block numbers
+    #   - smart (values to columns)
+    #   - smart_mystery (values to columns)
+    #   - count of pre-fail messages, not ready counts etc
+    #   - min, max, delta for:
+    #     - number of IO completions (len 5)
+    #     - io_completion_times (len 16)
+    #     - retry_count
+    #     - avg_io
+    #     - max_io
+    #     - timeout_count
+    #     - sense_data1-9+B
+    disks = get_disks(es)
+
+    for disk in disks:
+        disk_label = disk['disk_location']
+        cluster = disk['cluster_name']
+        bad_block_events = sorted(get_disk_bad_blocks(
+            es,
+            cluster, disk_label, with_ts=True).values())
+        is_broken = 0 if not bad_block_events else 1
+
+        if is_broken == 1:
+            inflection_points = [time_of_failure - TIME_BEFORE_FAILURE
+                                 for time_of_failure in bad_block_events]
+        else:
+            inflection_points = [UTC_NOW]
+
+        for inflection_point in inflection_points:
+            try:
+                yield [is_broken, disk['type'],
+                       disk['c_broken_count'],
+                       *make_bad_block_data_slice(es, disk, inflection_point)]
+            except Exception as e:
+                log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
+                          str(e), cluster, disk_label)
+                continue
+
+
+
+
 def make_training_data(es, args):
     window_sizes = ["12h", "48h", "1w", "forever"]
     values_in_window = ["bad_block_count",
@@ -1010,12 +1094,19 @@ def make_training_data(es, args):
                   'disk_type', *window_field_names]
     log.info("Using field names %s",
              ", ".join(fieldnames))
+
+
+    if args.op_type == "disks":
+        dataset = prepare_training_data(es)
+    elif args.op_type == "bad_blocks":
+        dataset = prepare_bad_block_training_data(es)
+
     with args.writefile as csvfile:
         writer = csv.writer(csvfile,
                                 delimiter=';',
                                 quotechar='|', quoting=csv.QUOTE_MINIMAL)
         writer.writerow(fieldnames)
-        for row in prepare_training_data(es):
+        for row in dataset:
             writer.writerow(row)
 
 
@@ -1047,6 +1138,11 @@ if __name__ == '__main__':
                                     (['-w','--writefile'],
                                      {'type': argparse.FileType('w'),
                                       'default': '-'}),
+                                    (['-t','--type'],
+                                     {'type': str,
+                                      'choices': ['disks', 'bad_blocks'],
+                                      'dest': 'op_type',
+                                      'default': 'disks'}),
                                 ],
                                 make_training_data),
                                ('disk',
@@ -1059,6 +1155,7 @@ if __name__ == '__main__':
                            ])
 
     args = parser.parse_args()
+    daiquiri.setup()
     common.set_log_level_from_args(args, log)
     es_conn = Elasticsearch(args.es_nodes, timeout=args.timeout)
     args.func(es=es_conn, args=args)

@@ -23,6 +23,22 @@ np.random.seed(42)
 random.seed(42)
 
 
+def predict_best(*args, **kwargs):
+    # Sort on highest TPR, then lowest FAR:
+    results = predict(*args, **kwargs)
+    results.sort(key=lambda tup: tup[1], reverse=False)
+    results.sort(reverse=True, key=lambda tup: tup[0])
+    return results[0]
+
+
+
+def predict_worst(*args, **kwargs):
+    results = predict(*args, **kwargs)
+    results.sort(key=lambda tup: tup[1], reverse=True)
+    results.sort(reverse=False, key=lambda tup: tup[0])
+    return results[0]
+
+
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
             classifier=tree.DecisionTreeClassifier, nrounds=None):
     training_broken, witheld_broken = sample_matrix(broken,
@@ -60,8 +76,7 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
         return results
 
 
-def find_best_training_proportion(broken, ok, nrounds=1):
-
+def find_best_training_proportion(broken, ok, nrounds, broken_start, ok_start):
     MIN_DATAPOINTS_BROKEN = 3
 
     num_broken_drives, _ = broken.shape
@@ -82,17 +97,17 @@ def find_best_training_proportion(broken, ok, nrounds=1):
     best_far = float("inf")
     best_tpr_combination = None
     best_far_combination = None
-    keep_ok_p = range(min_ok_percent, 76, 10)
-    keep_broken_p = range(min_broken_percent, max_broken_percent + 1, 10)
+    keep_ok_p = range(max(min_ok_percent, ok_start), 76, 10)
+    keep_broken_p = range(max(broken_start, min_broken_percent),
+                          max_broken_percent + 1, 10)
 
     highest_tolerable_far = 0.1
     lowest_tolerable_tpr = 0.5
 
     for ok_p, broken_p in itertools.product(keep_ok_p, keep_broken_p):
         log.debug("Testing %d%% ok, %d%% broken data", ok_p, broken_p)
-        tpr, far, _tree = sorted(predict(broken, ok, keep_broken=broken_p/100,
-                                         keep_nonbroken=ok_p/100, nrounds=nrounds),
-                                 key=lambda tup: tup[0])[0]
+        tpr, far, _tree = predict_worst(broken, ok, keep_broken=broken_p/100,
+                                        keep_nonbroken=ok_p/100, nrounds=nrounds)
         if far <= 0.001 or tpr >= 0.999:
             # Ignoring perfect outcome
             continue
@@ -119,7 +134,9 @@ def find_best_training_proportion(broken, ok, nrounds=1):
 
 
 def best_settings(ok, broken, args):
-    ok_p, broken_p = find_best_training_proportion(broken, ok, args.nrounds)
+    ok_p, broken_p = find_best_training_proportion(broken, ok, args.nrounds,
+                                                   broken_start=args.broken_start,
+                                                   ok_start=args.ok_start)
     tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
                               keep_nonbroken=ok_p/100)
     print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
@@ -163,15 +180,8 @@ def make_tree(ok, broken, args):
     broken_p = args.percent_broken
     ok_p = args.percent_ok
     if args.nrounds:
-        results = predict(broken, ok, keep_broken=broken_p/100,
-                                 keep_nonbroken=ok_p/100, nrounds=args.nrounds)
-        # Sort on highest TPR, then lowest FAR:
-        results.sort(key=lambda tup: tup[1])
-        results.sort(reverse=True,
-                     key=lambda tup: tup[0])
-
-        # Largest TPR first
-        tpr, far, t = results[0]
+        tpr, far, t = predict_best(broken, ok, keep_broken=broken_p/100,
+                                   keep_nonbroken=ok_p/100, nrounds=args.nrounds)
     else:
         tpr, far, t = predict(broken, ok, keep_broken=broken_p/100,
                               keep_nonbroken=ok_p/100)
@@ -271,6 +281,16 @@ if __name__ == '__main__':
                                      {'type': int,
                                       'help': "Run n iterations in stead of one",
                                       'dest': 'nrounds',
+                                      'default': 1}),
+                                    (['-b','--broken-start-percent'],
+                                     {'type': int,
+                                      'help': "Start trying at this percentage",
+                                      'dest': 'broken_start',
+                                      'default': 1}),
+                                    (['-o','--ok-start-percent'],
+                                     {'type': int,
+                                      'help': "Start trying at this percentage",
+                                      'dest': 'ok_start',
                                       'default': 1}),
                                 ],
                                 best_settings),
