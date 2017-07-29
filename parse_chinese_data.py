@@ -111,16 +111,16 @@ def verify_training(clf, verification_set, expected_labels):
         for prediction, expected in zip(clf.predict(verification_set),
                                         expected_labels):
             if prediction == expected:
-                log.debug("Found correct prediction of %s",
-                          common.NUM_TO_PREDICTION[prediction])
+                #log.debug("Found correct prediction of %s",
+                #          common.NUM_TO_PREDICTION[prediction])
                 if expected == common.PREDICT_FAIL:
                     true_positives += 1
                 else:
                     true_negatives += 1
             else:
-                log.debug("Found misprediction, got %s expected %s",
-                          common.NUM_TO_PREDICTION[prediction],
-                          common.NUM_TO_PREDICTION[expected])
+                #log.debug("Found misprediction, got %s expected %s",
+                #          common.NUM_TO_PREDICTION[prediction],
+                #          common.NUM_TO_PREDICTION[expected])
                 if expected == common.PREDICT_FAIL:
                     false_negatives += 1
                 else:

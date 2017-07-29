@@ -1010,7 +1010,7 @@ def make_bad_block_data_slice(es, disk, window_end):
                                                       start=t, end=window_end)
                                      for t in window_start_dates]
 
-    all_time = window_disk_data(es, cluster, disk_label)
+    all_time = window_disk_data(es, cluster, disk_label, end=window_end)
 
 
     return [*twelve_h, *fourtyeight_h, *week, *all_time]

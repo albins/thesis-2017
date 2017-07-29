@@ -139,6 +139,16 @@ def disk_training_set_feature_labels():
     return list(data.keys())
 
 
+def bad_block_training_set_feature_labels():
+    data = read_csv_w_labels("../Data/training_data_bad_blocks.csv")
+    return list(data.keys())
+
+def bad_block_training_set():
+    data = read_csv_w_labels("../Data/training_data_bad_blocks.csv")
+    matrix_data = data.as_matrix()
+    matrix_data = matrix_data[matrix_data[:,0].argsort()]
+    return matrix_data
+
 def split_disk_data(disk_data):
     """
     Presumes that disk_data is sorted with non-broken to broken disks

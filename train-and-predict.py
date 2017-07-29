@@ -271,7 +271,8 @@ if __name__ == '__main__':
                         type=str,
                         help="use this dataset",
                         default="cern_disks",
-                        choices=["cern_disks", "zhu_disks", "random"])
+                        choices=["cern_disks", "zhu_disks", "random",
+                                 "cern_bad_blocks"])
     common.add_subcommands(parent=parser,
                            descriptions=[
                                ('best_settings',
@@ -371,6 +372,12 @@ if __name__ == '__main__':
         args.feature_labels = ["random%d" %i for i in range(1, train_data.shape[1])]
         args.roc_start_p = 1
         args.roc_broken_p = 75
+    elif args.use_dataset == "cern_bad_blocks":
+        train_data = common.bad_block_training_set()
+        args.feature_labels = common.bad_block_training_set_feature_labels()
+        args.feature_labels.remove('is_broken')
+        args.roc_start_p = 1
+        args.roc_broken_p = 41
     else:
         print("That dataset is not supported yet")
         exit(1)
