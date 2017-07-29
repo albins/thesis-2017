@@ -971,7 +971,7 @@ def prepare_training_data(es):
                 lambda t: window_disk_data(es, cluster, disk_label, start=t,
                                            end=window_end), window_start_dates)
 
-            all_time = window_disk_data(es, cluster, disk_label)
+            all_time = window_disk_data(es, cluster, disk_label, end=window_end)
         except Exception as e:
             log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
                       str(e), cluster, disk_label)
