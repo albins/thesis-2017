@@ -1042,8 +1042,20 @@ def make_data_window(es, start, end, disk, previous_window,
 def prepare_training_data(es, bad_blocks=False):
     disks = get_disks(es)
 
+    EST_NO_DISKS = 4560
+
+    start_time = time.time()
     for i, disk in enumerate(disks, start=1):
-        log.info("Processing disk number %d", i)
+        if i > 1:
+            seconds_past = time.time() - start_time
+            avg_rate = seconds_past / (i-1)
+        else:
+            avg_rate = 0
+        disks_left = EST_NO_DISKS - i
+        est_seconds_left = disks_left * avg_rate
+
+        log.info("Processing disk number %d. Estimated time left: %s",
+                 i, datetime.timedelta(seconds=est_seconds_left))
         disk_label = disk['disk_location']
         cluster = disk['cluster_name']
         if disk['broke_at']:
