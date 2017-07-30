@@ -124,7 +124,6 @@ def time_ranges(start, end, step_size):
     Generate (start date and end date) between times start and end of
     size step size.
     """
-    assert end > start, "interval must be non-empty"
     assert isinstance(step_size, timedelta), "must be timedelta"
     assert isinstance(start, datetime), "must be date"
     assert isinstance(end, datetime), "must be date"
@@ -1063,18 +1062,17 @@ def prepare_training_data(es, bad_blocks=False):
         else:
             faults = [] if not first_breakage else [first_breakage]
 
-
         previous_window = None
         for start, end in time_ranges(start=RECORDING_START,
                                       end=window_end, step_size=WINDOW_SIZE):
             log.info("Generating data for disk %s %s, time window %s--%s",
                      cluster, disk_label, start, end)
 
-            this_window = make_data_window(es=es, start=start, end=end,
-                                           disk=disk,
-                                           previous_window=previous_window,
-                                           fault_timestamps=faults)
             try:
+                this_window = make_data_window(es=es, start=start, end=end,
+                                               disk=disk,
+                                               previous_window=previous_window,
+                                               fault_timestamps=faults)
                 yield this_window
             except Exception as e:
                 log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
