@@ -6,8 +6,6 @@ import common
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 import time
-import sys
-import logging
 import argparse
 import statistics
 import csv
@@ -16,7 +14,7 @@ import itertools
 import pytz
 import regex
 from elasticsearch import Elasticsearch
-from elasticsearch_dsl import Search, Q, A
+from elasticsearch_dsl import Search, Q
 from elasticsearch.helpers import scan
 import dateparser
 import daiquiri
@@ -1023,8 +1021,8 @@ def make_data_window(es, start, end, disk, previous_window,
     disk_label = disk['disk_location']
     cluster = disk['cluster_name']
 
-    # is one of the faults in the next window?
-    next_window = (end, end + WINDOW_SIZE)
+    # is one of the faults in the two next windows?
+    next_window = (end, end + 2 * WINDOW_SIZE)
     mark_fault_close = any([in_window(ts, *next_window)
                             for ts in fault_timestamps])
     if mark_fault_close:
