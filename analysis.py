@@ -1044,7 +1044,8 @@ def make_data_window(es, start, end, disk, previous_window,
 def prepare_training_data(es, bad_blocks=False):
     disks = get_disks(es)
 
-    for disk in disks:
+    for i, disk in enumerate(disks, start=1):
+        log.info("Processing disk number %d", i)
         disk_label = disk['disk_location']
         cluster = disk['cluster_name']
         if disk['broke_at']:
@@ -1065,8 +1066,8 @@ def prepare_training_data(es, bad_blocks=False):
         previous_window = None
         for start, end in time_ranges(start=RECORDING_START,
                                       end=window_end, step_size=WINDOW_SIZE):
-            log.info("Generating data for disk %s %s, time window %s--%s",
-                     cluster, disk_label, start, end)
+            log.debug("Generating data for disk %s %s, time window %s--%s",
+                      cluster, disk_label, start, end)
 
             try:
                 this_window = make_data_window(es=es, start=start, end=end,
