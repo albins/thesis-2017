@@ -11,6 +11,7 @@ import logging
 import argparse
 import statistics
 import csv
+import itertools
 
 import pytz
 import regex
@@ -77,6 +78,9 @@ HARD_FAILURE_INDICATORS = ["raid.fdr.reminder",
 ONE_WEEK = timedelta(hours=7*24)
 UTC_NOW =  datetime.fromtimestamp(time.time(), tz=pytz.utc)
 TIME_BEFORE_FAILURE = timedelta(hours=10)
+RECORDING_START = datetime(year=2017, month=5, day=31,
+                           hour=13, tzinfo=pytz.utc)
+WINDOW_SIZE = timedelta(hours=24)
 
 Q_TROUBLE_EVENTS = Q("bool", should=[*[Q('match', event_type=t)
                                        for t in TROUBLE_REASONS],
@@ -114,12 +118,45 @@ SMART_MYSTERY_LENGTH = 220
 SMART_MYSTERY_KEEP_LENGTH = len(SMART_MYSTERY_FIELDS_KEEP)
 SMART_RAW_IDX = 3
 
+
+def time_ranges(start, end, step_size):
+    """
+    Generate (start date and end date) between times start and end of
+    size step size.
+    """
+    assert end > start, "interval must be non-empty"
+    assert isinstance(step_size, timedelta), "must be timedelta"
+    assert isinstance(start, datetime), "must be date"
+    assert isinstance(end, datetime), "must be date"
+
+    ranges = []
+
+    for i in itertools.count():
+        if i == 0:
+            interval_start = start
+        else:
+            _, interval_start = ranges[i-1]
+
+        interval_end = interval_start + step_size
+        if interval_end <= end:
+            ranges.append((interval_start, interval_end))
+        else:
+            break
+
+    return ranges
+
+
 def flatten(lst):
     return sum(lst, [])
 
+
 def windowed_query(s, start=None, end=UTC_NOW):
+    """
+    Window a query for a time interval [x, y[.
+    """
+
     time_range = {'gte': start} if start else {}
-    time_range['lte'] = end
+    time_range['lt'] = end
 
     s = s.sort({"@timestamp": {"order": "asc"}})\
         .filter("range", **{'@timestamp': time_range})
@@ -923,65 +960,6 @@ def normalise_type(disk_type_str):
         return -1
 
 
-def prepare_training_data(es):
-    # for each cluster:
-    # - count of broken disks in cluster
-    #
-    # for each disk:
-    # - broken 1/0
-    # - type of disk (normalise to int)
-    # - for each window (12h, 48h, week, all time):
-    #   - read error count for drive
-    #   - number of bad blocks for drive
-    #   - standard deviation of bad block numbers
-    #   - smart (values to columns)
-    #   - smart_mystery (values to columns)
-    #   - count of pre-fail messages, not ready counts etc
-    #   - min, max, delta for:
-    #     - number of IO completions (len 5)
-    #     - io_completion_times (len 16)
-    #     - retry_count
-    #     - avg_io
-    #     - max_io
-    #     - timeout_count
-    #     - sense_data1-9+B
-    disks = get_disks(es)
-
-    for disk in disks:
-        is_broken = 0 if disk['broke_at'] is None else 1
-        disk_label = disk['disk_location']
-        cluster = disk['cluster_name']
-
-        # Fixme: handle disks failing twice!
-        if disk['broke_at']:
-            first_breakage = min(disk['broke_at'])
-            window_end = first_breakage - TIME_BEFORE_FAILURE
-        else:
-            window_end = UTC_NOW
-
-        window_start_dates = [window_end - dur for dur in
-                              [timedelta(hours=12),
-                               timedelta(hours=48), ONE_WEEK]]
-        log.debug("Window start dates are: %s",
-                  ", ".join([str(x) for x in window_start_dates]))
-
-
-        try:
-            twelve_h, fourtyeight_h, week = map(
-                lambda t: window_disk_data(es, cluster, disk_label, start=t,
-                                           end=window_end), window_start_dates)
-
-            all_time = window_disk_data(es, cluster, disk_label, end=window_end)
-        except Exception as e:
-            log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
-                      str(e), cluster, disk_label)
-            continue
-
-        yield [is_broken, disk['type'],
-               disk['c_broken_count'],
-               *twelve_h, *fourtyeight_h, *week, *all_time]
-
-
 def make_report(es, args):
     includes = set(args.include)
     if "scrub" in includes:
@@ -1016,60 +994,98 @@ def make_bad_block_data_slice(es, disk, window_end):
     return [*twelve_h, *fourtyeight_h, *week, *all_time]
 
 
-def prepare_bad_block_training_data(es):
-    # for each cluster:
-    # - count of broken disks in cluster
-    #
-    # for each disk:
-    # if no bad blocks: broken = 0
-    # else, one snapshot per broken block, each broken = 1
-    # - type of disk (normalise to int)
-    # - for each window (12h, 48h, week, all time):
-    #   - read error count for drive
-    #   - number of bad blocks for drive
-    #   - standard deviation of bad block numbers
-    #   - smart (values to columns)
-    #   - smart_mystery (values to columns)
-    #   - count of pre-fail messages, not ready counts etc
-    #   - min, max, delta for:
-    #     - number of IO completions (len 5)
-    #     - io_completion_times (len 16)
-    #     - retry_count
-    #     - avg_io
-    #     - max_io
-    #     - timeout_count
-    #     - sense_data1-9+B
+def in_window(timestamp, start, end):
+    """
+    Return True if a timestamp is in the given window, False otherwise.
+
+    Intervals are [interval[
+    """
+    assert all([isinstance(x, datetime) for x in [timestamp, start, end]])
+
+    return timestamp >= start and timestamp < end
+
+
+def calculate_deltas(previous_data, new_data):
+    if not previous_data:
+        return [0] * len(new_data)
+
+    deltas = []
+    for i, y_new in enumerate(new_data):
+        delta = y_new - previous_data[i]
+        deltas.append(delta)
+    return deltas
+
+
+def make_data_window(es, start, end, disk, previous_window,
+                     fault_timestamps):
+    assert isinstance(start, datetime)
+    assert isinstance(end, datetime)
+
+    disk_label = disk['disk_location']
+    cluster = disk['cluster_name']
+
+    # is one of the faults in the next window?
+    next_window = (end, end + WINDOW_SIZE)
+    mark_fault_close = any([in_window(ts, *next_window)
+                            for ts in fault_timestamps])
+    if mark_fault_close:
+        broken_column = 1
+    else:
+        broken_column = 0
+
+    # Skip is_broken and disk_type in comparison
+    previous_data = None if not previous_window else previous_window[2:]
+
+    new_data = window_disk_data(es, cluster, disk_label, start=start, end=end)
+    deltas = calculate_deltas(previous_data, new_data)
+    log.debug("Deltas were: %s", ", ".join([str(i) for i in deltas]))
+    return [broken_column, disk['type'], *new_data, *deltas]
+
+
+def prepare_training_data(es, bad_blocks=False):
     disks = get_disks(es)
 
     for disk in disks:
         disk_label = disk['disk_location']
         cluster = disk['cluster_name']
-        bad_block_events = sorted(get_disk_bad_blocks(
-            es,
-            cluster, disk_label, with_ts=True).values())
-        is_broken = 0 if not bad_block_events else 1
-
-        if is_broken == 1:
-            inflection_points = [time_of_failure - TIME_BEFORE_FAILURE
-                                 for time_of_failure in bad_block_events]
+        if disk['broke_at']:
+            first_breakage = min(disk['broke_at'])
+            window_end = first_breakage - TIME_BEFORE_FAILURE
         else:
-            inflection_points = [UTC_NOW]
+            first_breakage = None
+            window_end = UTC_NOW
 
-        for inflection_point in inflection_points:
+        if bad_blocks:
+            bad_block_events = sorted(get_disk_bad_blocks(
+                es,
+                cluster, disk_label, with_ts=True).values())
+            faults = bad_block_events
+        else:
+            faults = [] if not first_breakage else [first_breakage]
+
+
+        previous_window = None
+        for start, end in time_ranges(start=RECORDING_START,
+                                      end=window_end, step_size=WINDOW_SIZE):
+            log.info("Generating data for disk %s %s, time window %s--%s",
+                     cluster, disk_label, start, end)
+
+            this_window = make_data_window(es=es, start=start, end=end,
+                                           disk=disk,
+                                           previous_window=previous_window,
+                                           fault_timestamps=faults)
             try:
-                yield [is_broken, disk['type'],
-                       disk['c_broken_count'],
-                       *make_bad_block_data_slice(es, disk, inflection_point)]
+                yield this_window
             except Exception as e:
                 log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
                           str(e), cluster, disk_label)
                 continue
+            previous_window = this_window
 
 
 
 
 def make_training_data(es, args):
-    window_sizes = ["12h", "48h", "1w", "forever"]
     values_in_window = ["bad_block_count",
                         "bad_block_stdev",
                         "trouble_log_count",
@@ -1088,18 +1104,16 @@ def make_training_data(es, args):
                         "retry_count",
                         "timeout_count",
     ]
-    window_field_names = flatten([["{}_{}".format(w, heading) for heading in
-                                   values_in_window] for w in window_sizes])
-    fieldnames = ['is_broken', 'cluster_broken_count',
-                  'disk_type', *window_field_names]
-    log.info("Using field names %s",
-             ", ".join(fieldnames))
+    window_field_names = [*values_in_window,
+                          *["{}_delta".format(wn) for wn in values_in_window]]
+    fieldnames = ['is_broken', 'disk_type', *window_field_names]
+    log.info("Using field names %s", ", ".join(fieldnames))
 
 
     if args.op_type == "disks":
-        dataset = prepare_training_data(es)
+        dataset = prepare_training_data(es, bad_blocks=False)
     elif args.op_type == "bad_blocks":
-        dataset = prepare_bad_block_training_data(es)
+        dataset = prepare_training_data(es, bad_blocks=True)
 
     with args.writefile as csvfile:
         writer = csv.writer(csvfile,
