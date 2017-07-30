@@ -77,7 +77,7 @@ HARD_FAILURE_INDICATORS = ["raid.fdr.reminder",
 
 ONE_WEEK = timedelta(hours=7*24)
 UTC_NOW =  datetime.fromtimestamp(time.time(), tz=pytz.utc)
-TIME_BEFORE_FAILURE = timedelta(hours=10)
+TIME_BEFORE_FAILURE = timedelta(hours=2)
 RECORDING_START = datetime(year=2017, month=5, day=31,
                            hour=13, tzinfo=pytz.utc)
 WINDOW_SIZE = timedelta(hours=24)
