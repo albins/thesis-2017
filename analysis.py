@@ -1055,7 +1055,7 @@ def prepare_training_data(es, bad_blocks=False):
         est_seconds_left = disks_left * avg_rate
 
         log.info("Processing disk number %d. Estimated time left: %s",
-                 i, datetime.timedelta(seconds=est_seconds_left))
+                 i, timedelta(seconds=est_seconds_left))
         disk_label = disk['disk_location']
         cluster = disk['cluster_name']
         if disk['broke_at']:
