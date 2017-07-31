@@ -989,12 +989,11 @@ def es_get_disks(es, index):
     return cluster_disks
 
 
-
 def as_es_index(prefix, datetime):
     """
     Generate a canonical ES index name from a datetime and a prefix.
     """
-    return "{}-{:%Y-%m-%d}".format(prefix, datetime)
+    return "{}-{:%Y-%m-%d-%h}".format(prefix, datetime)
 
 
 def es_get_high_water_mark(es, index):

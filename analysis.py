@@ -13,7 +13,6 @@ import itertools
 
 import pytz
 import regex
-from elasticsearch import Elasticsearch
 from elasticsearch_dsl import Search, Q
 from elasticsearch.helpers import scan
 import dateparser
@@ -775,7 +774,7 @@ def get_disks(es):
     broke_at = bucket_broken_disks(get_broken_disks(es),
                                    window_width=ONE_WEEK)
 
-    ok_index = "{}-2017-06-21".format(ES_LOWLEVEL_BASE)
+    ok_index = "{}-2017-06-21*".format(ES_LOWLEVEL_BASE)
     search_start = datetime(2017, 6, 21, tzinfo=pytz.utc)
     search_end = search_start + timedelta(minutes=20)
 
@@ -1180,5 +1179,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     daiquiri.setup()
     common.set_log_level_from_args(args, log)
-    es_conn = Elasticsearch(args.es_nodes, timeout=args.timeout)
+    es_conn = common.es_conn_from_args(args)
     args.func(es=es_conn, args=args)

@@ -6,6 +6,7 @@ import pandas
 import math
 
 import numpy as np
+from elasticsearch import Elasticsearch
 
 log = logging.getLogger(__name__)
 
@@ -35,10 +36,25 @@ def add_elasticsearch_options(parser, default_address):
     parser.add_argument('--timeout_s', '-t', nargs='?', dest='timeout',
                         default=10,
                         type=int, help="Database operation timeout in seconds")
-    parser.add_argument('--es_node', '-s', nargs='*', type=str,
+    parser.add_argument('--es-node', '-s', nargs='?', type=str,
                         dest='es_nodes',
                         help="Elasticsearch node to connect to",
-                        default=[default_address])
+                        default=default_address)
+    parser.add_argument('--es-sniff', '-i',
+                        help=("Enable ElasticSearch sniffing "
+                              " before connecting and on connection failures"),
+                        action='store_true',
+                        dest="do_es_sniff")
+
+
+def es_conn_from_args(args):
+    es = Elasticsearch([args.es_nodes], timeout=args.timeout,
+                       sniff_on_start=args.do_es_sniff,
+                       sniff_on_connection_fail=args.do_es_sniff,
+                       sniffer_timeout=args.timeout,
+                       retry_on_timeout=True,
+    )
+    return es
 
 
 def set_log_level_from_args(args, logger):
@@ -197,3 +213,9 @@ def random_training_set(count, features):
     training_data = np.append(broken_or_ok_column, random_array, 1)
     training_data[training_data[:,0].argsort()]
     return training_data
+
+
+def unique_values_in_dataset(data):
+    for x in data:
+        print("{}: {}".format(x, ", ".join([str(x)
+                                            for x in sorted(set(data[x]))])))
