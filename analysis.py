@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from parse_emails import format_counter
+from parse_emails import format_counter, render_tex_histogram
 from parse_smart_pages import count_disks
 import common
 
@@ -10,6 +10,7 @@ import argparse
 import statistics
 import csv
 import itertools
+from calendar import month_abbr
 
 import pytz
 import regex
@@ -778,7 +779,6 @@ def get_disks(es):
     search_start = datetime(2017, 6, 21, tzinfo=pytz.utc)
     search_end = search_start + timedelta(minutes=20)
 
-
     s = Search(using=es, index=ok_index)\
         .filter("range", **{'@timestamp':
                             {'gte': search_start,
@@ -800,7 +800,7 @@ def get_disks(es):
         if not disk in cluster_disks[cluster]:
             log.debug("Found new data for %s %s. Got %d/%d entries so far",
                       cluster, disk, found_disks, disk_count)
-            broke_data = broke_at[cluster][disk] if disk in broke_at[cluster]\
+            broke_data = sorted(broke_at[cluster][disk]) if disk in broke_at[cluster]\
                          else None
             disk_type = data['type']
             cluster_disks[cluster][disk] = {'cluster_name': cluster,
@@ -1138,6 +1138,85 @@ def make_disk_report(es, args):
     print_disk_report(get_overview_data(es, cluster, disk_name))
 
 
+def clean_duplicate_blocks(bad_block_data):
+    earliest_seen_block_times = defaultdict(lambda: (UTC_NOW, None))
+
+    for block_tuple in bad_block_data:
+        key = "{}_{}_{}".format(*block_tuple[1:])
+        if block_tuple[0] <= earliest_seen_block_times[key][0]:
+            earliest_seen_block_times[key] = block_tuple
+
+    return earliest_seen_block_times.values()
+
+
+def make_graph(es, args):
+    histogram = Counter()
+    x_label = ""
+    y_label = ""
+
+    if args.graph_type == "bad_disks_cluster" \
+       or args.graph_type == "bad_disks_month":
+        y_label = "Number of disk failures"
+        broken_disks = bucket_broken_disks(get_broken_disks(es),
+                                           window_width=2*ONE_WEEK)
+
+        if args.graph_type == "bad_disks_cluster":
+            x_label = "Cluster"
+            for cluster, cluster_disks in broken_disks.items():
+                histogram[cluster] = len(cluster_disks.keys())
+        else:
+            # Monthly grouping
+            x_label = "Month"
+            for cluster_disks in broken_disks.values():
+                for disk_breakages in cluster_disks.values():
+                    first_broke = sorted(disk_breakages)[0]
+                    month = "{:%b}".format(first_broke)
+                    histogram[month] += 1
+
+    elif args.graph_type == "bad_blocks_month" \
+         or args.graph_type == "bad_blocks_cluster":
+        bad_blocks = clean_duplicate_blocks(get_bad_blocks(es))
+
+        if args.graph_type == "bad_blocks_month":
+            x_label = "Month"
+            group_on = lambda block_data: "{:%b}".format(block_data[0])
+        else:
+            x_label = "Cluster"
+            group_on = lambda block_data: block_data[1]
+
+        for bad_block_data in bad_blocks:
+            histogram[group_on(bad_block_data)] += 1
+
+    elif args.graph_type == "reconstruction_time":
+        pass
+    elif args.graph_type == "disk_copy_time":
+        pass
+    else:
+        assert False, "Unknown graph report %s!" % args.graph_type
+
+    if "_month" in args.graph_type:
+        abbr_to_nr = {}
+
+        for i, abbr in enumerate(month_abbr):
+            abbr_to_nr[abbr] = i
+
+        data_pairs = sorted(histogram.items(),
+                            key=lambda tpl: abbr_to_nr[tpl[0]])
+    elif "_cluster" in args.graph_type:
+        # Sort by data, largest first
+        data_pairs = sorted(histogram.items(), key=lambda pair: pair[1],
+                            reverse=True)
+    else:
+        # Alphabetically or by size
+        data_pairs = sorted(histogram.items())
+
+    with args.writefile as f:
+        f.write(render_tex_histogram(data_pairs,
+                                     x_label,
+                                     y_label,
+                                     "20pt"))
+
+
 if __name__ == '__main__':
     parser = common.make_es_base_parser()
     common.add_subcommands(parent=parser,
@@ -1173,7 +1252,27 @@ if __name__ == '__main__':
                                     (['cluster'], {'type': str}),
                                     (['disk_location'], {'type': str})
                                 ],
-                                make_disk_report)
+                                make_disk_report),
+
+                               ('graph',
+                                "Produce graphs and histograms",
+                                [
+                                    (['-w', '--writefile'],
+                                     {'type': argparse.FileType('w'),
+                                      'default': '-'}),
+                                    (['graph_type'],
+                                     {'type': str,
+                                      'choices':
+                                      ["bad_blocks_cluster",
+                                       "bad_blocks_month",
+                                       "bad_disks_cluster",
+                                       "bad_disks_month",
+                                       "reconstruction_time",
+                                       "disk_copy_time"]}),
+                                ],
+                                make_graph)
+
+
                            ])
 
     args = parser.parse_args()

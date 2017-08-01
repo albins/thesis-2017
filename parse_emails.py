@@ -369,7 +369,7 @@ def render_tex_histogram(tuples, x_label, y_label, bar_width):
     labels = []
     for label, weight in tuples:
         labels.append(label)
-        lines.append("({}, {})\n".format(label, weight))
+        lines.append("\t({}, {})\n".format(label, weight))
     return TEX_HISTOGRAM.format(label_field=",".join(labels),
                                 coordinates="".join(lines),
                                 x_label=x_label,

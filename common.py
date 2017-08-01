@@ -30,7 +30,7 @@ ZHU_FEATURE_LABELS = [
 
 PREDICT_FAIL = -1
 PREDICT_OK = 1
-NUM_TO_PREDICTION = {1: "OK", -1: "FAIL"}
+NUM_TO_PREDICTION = {PREDICT_OK: "OK", PREDICT_FAIL: "FAIL"}
 
 def add_elasticsearch_options(parser, default_address):
     parser.add_argument('--timeout_s', '-t', nargs='?', dest='timeout',
