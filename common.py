@@ -120,7 +120,10 @@ def zhu_2013_normalise(dataset, start_column=1):
         top = x - min_x
         assert top != float('inf')
         bottom = max_x - min_x
-        assert bottom != 0
+        if bottom == 0:
+            #log.warning("Column %d has only value %d!",
+            #            column, bottom)
+            return x
         return 2 * (top/bottom - 1)
 
     for index, x in np.ndenumerate(dataset[:,start_column:]):
@@ -130,6 +133,32 @@ def zhu_2013_normalise(dataset, start_column=1):
         dataset[row_idx][column_idx] = normalised
 
     return dataset
+
+
+def zhu_2013_normalise_fast(dataset, start_column=1):
+
+    column_idx = start_column - 1
+    set_to_normalise = dataset[:, start_column:]
+    labels_column = dataset[:, column_idx]
+
+    def normalise_column(col):
+        x_min = col.min()
+        x_max = col.max()
+        x_diff = x_max - x_min
+
+        if x_diff == 0:
+            return col
+
+        col = col - x_min
+        col = col * (2/x_diff)
+        col -= 1
+        return col
+
+    return np.insert(np.apply_along_axis(normalise_column,
+                                         0, set_to_normalise),
+                     0,
+                     labels_column,
+                     axis=1)
 
 
 def read_csv_w_labels(filename):

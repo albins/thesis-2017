@@ -4,6 +4,7 @@ import common
 
 import numpy as np
 
+
 def make_matrix(n, m):
     a = np.arange(1, n * m + 1)
     return a.reshape(n, m)
@@ -27,3 +28,12 @@ def test_sample_matrix():
             frst, last = assert_keep_portion_split(m, percent/100)
             joined = np.append(frst, last, axis=0)
             assert np.array_equal(joined, m)
+
+
+def test_more_efficient_normalisation():
+    m = make_matrix(1231, 19)
+    m2 = m.copy()
+
+    m = common.zhu_2013_normalise(m)
+    m2 = common.zhu_2013_normalise_fast(m2)
+    assert (m == m2).any()
