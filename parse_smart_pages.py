@@ -1085,9 +1085,8 @@ def estimate_rate(current_rate, min_rate, max_rate, avg_rate):
 def throttle_gen(vals, keep_every=1):
     for i, val in enumerate(vals):
         if i % keep_every == 0:
+            log.debug("Keeping # %d: %d", i, val)
             yield val
-        else:
-            continue
 
 
 def file_index_to_es_data(file_index, last_seen, type_fw_index, throttle=1):
@@ -1108,6 +1107,9 @@ def file_index_to_es_data(file_index, last_seen, type_fw_index, throttle=1):
     min_rate = 999999999
     max_rate = 0
     average_rate = 0
+
+    log.info("Starting upload of %d files, skipping %d files",
+             num_files_used, skipped_files)
 
     for i, (cluster, ts, filename) in enumerate(cluster_ts_filenames):
         if i % interval_length == 0 and i != 0:
