@@ -365,6 +365,18 @@ def get_scrubbing_durations(es):
         yield (timestamp, cluster, disk, timedelta(seconds=scrubbing_time))
 
 
+def extract_timestring(timestring):
+    time_components = [float(x) for x in timestring.split(":")]
+    if len(time_components) == 2:
+        minutes, seconds = time_components
+        return 60 * minutes + seconds
+    elif len(time_components) == 3:
+        hours, minutes, seconds = time_components
+        return 60 * 60 * hours + 60 * minutes + seconds
+    else:
+        raise ValueError("Invalid time string {}".format(timestring))
+
+
 def get_reconstruction_times(es):
     """
     Return a list of reconstruction times, in seconds.
@@ -386,25 +398,38 @@ def get_reconstruction_times(es):
             if not match or not match['timestring']:
                 log.warning("Log entry didn't match reconstruction time RE!")
                 continue
-
-            time_components = [float(x) for x in match['timestring'].split(":")]
-            if len(time_components) == 2:
-                minutes, seconds = time_components
-                total_seconds = 60 * minutes + seconds
-            elif len(time_components) == 3:
-                hours, minutes, seconds = time_components
-                total_seconds = 60*60*hours + 60 * minutes + seconds
-            else:
-                log.error("Wrong length for time string %d",
-                          len(time_components))
+            try:
+                total_seconds = extract_timestring(match['timestring'])
+            except ValueError as e:
+                log.error("Error getting reconstruction time: %s", e)
                 continue
+
         yield total_seconds
 
 
 def get_disk_copy_times(es):
     """
+    Generator for disk copy times, in seconds.
     """
-    pass
+    time_re = regex.compile(".*was completed.*in (?<timestring>.*?)\.")
+
+    copy_done_event_type = "raid.rg.diskcopy.done"
+
+    s = Search(using=es, index=ES_SYSLOG_INDEX)\
+        .filter("term", event_type=copy_done_event_type)
+
+    for doc in s.scan():
+        doc = deserialise_log_entry(doc)
+        match = time_re.match(doc['body'])
+        if not match or not match['timestring']:
+            log.warning("Log entry didn't match diskcopy time RE!")
+            continue
+        try:
+            total_seconds = extract_timestring(match['timestring'])
+        except ValueError as e:
+            log.error("Error getting copy time: %s", e)
+            continue
+        yield total_seconds
 
 
 def get_minmax_scrub_durations(scrub_durations):
@@ -1265,8 +1290,10 @@ def make_graph(es, args):
         histogram = bin_values(durations_s, bins=5)
 
     elif args.graph_type == "disk_copy_time":
-        durations_s = get_disk_copy_times(es)
-        histogram = bin_values(durations_s)
+        durations_s = list(get_disk_copy_times(es))
+        log.info("Loaded %d disk copy time measurements",
+                 len(durations_s))
+        histogram = bin_values(durations_s, bins=8)
 
     elif args.graph_type == "scrubbing_time":
         durations_s = [ts[3].total_seconds()
