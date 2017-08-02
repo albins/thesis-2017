@@ -18,14 +18,9 @@ import dateparser
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan, parallel_bulk, streaming_bulk
 import pytz
+import daiquiri
 
-log = logging.getLogger()
-ch = logging.StreamHandler(sys.stderr)
-formatter = logging.Formatter('%(name)s %(levelname)s: %(message)s')
-ch.setFormatter(formatter)
-log.addHandler(ch)
-#log.setLevel(logging.INFO)
-
+log = daiquiri.getLogger()
 elastic_logger = logging.getLogger('elasticsearch')
 elastic_logger.setLevel(logging.WARNING)
 
@@ -1087,14 +1082,24 @@ def estimate_rate(current_rate, min_rate, max_rate, avg_rate):
     return estimate
 
 
-def file_index_to_es_data(file_index, last_seen, type_fw_index):
+def throttle_gen(vals, keep_every=1):
+    for i, val in enumerate(vals):
+        if i % keep_every == 0:
+            yield val
+        else:
+            continue
+
+
+def file_index_to_es_data(file_index, last_seen, type_fw_index, throttle=1):
     """
     Generate entries to insert into es_import from a file index and
     high-water-mark dictionary.
     """
-    cluster_ts_filenames = [triplet for
-                            triplet in file_index_to_triplets(file_index)
-                            if is_actual(triplet, last_seen)]
+    cluster_ts_filenames = throttle_gen(
+        [triplet for
+         triplet in file_index_to_triplets(file_index)
+         if is_actual(triplet, last_seen)],
+        keep_every=3)
     total_num_files = sum([len(x) for x in file_index.values()])
     num_files_used = len(cluster_ts_filenames)
     skipped_files = total_num_files - num_files_used
@@ -1103,7 +1108,6 @@ def file_index_to_es_data(file_index, last_seen, type_fw_index):
     min_rate = 999999999
     max_rate = 0
     average_rate = 0
-
 
     for i, (cluster, ts, filename) in enumerate(cluster_ts_filenames):
         if i % interval_length == 0 and i != 0:
@@ -1141,16 +1145,21 @@ def file_index_to_es_data(file_index, last_seen, type_fw_index):
             yield data_point
 
 
-def parse_into_es(es, file_index, type_fw_index):
+def parse_into_es(es, file_index, type_fw_index, throttle=1):
     """
     Intelligently take a file index dictionary and sync it with an ES
     instance.
+
+    If throttle is set to an integer, use only every nth record.
     """
     last_seen = es_get_high_water_mark(es, index=ES_INDEX)
     log.info("Using high-water mark: {}".format(
         ", ".join(["{}: {}".format(c, str(v)) for c, v in last_seen.items()])))
 
-    es_import(es, file_index_to_es_data(file_index, last_seen, type_fw_index))
+    es_import(es, file_index_to_es_data(file_index,
+                                        last_seen,
+                                        type_fw_index,
+                                        throttle=throttle))
 
 
 def runtime_statistics(runtimes):
@@ -1179,45 +1188,72 @@ def profile_parser(data_directory):
     print(runtime_statistics(runtimes))
 
 
+def make_incremental_es(es, args):
+    type_fw_index = disk_types_and_serials_from_path(args.data_directory)
+    parse_into_es(es, index_files(args.data_directory), type_fw_index,
+                  throttle=args.throttle)
+
+
+def print_disks(es, args):
+    print("Disk count per cluster:")
+    print("\t Clstr \t First \t Last \t Total")
+    print("\t--------------------------------")
+    sum_count = 0
+    for cluster, disks in sorted(es_get_disks(es, index=ES_INDEX).items(),
+                                 key=lambda x: len(x[1]), reverse=True):
+        print("\t {} \t {:2d}.{:2d} \t {:2d}.{:2d} \t {:4d}"
+              .format(cluster, *disks[0], *disks[-1], len(disks)))
+        sum_count += len(disks)
+    print("\t--------------------------------")
+    print("\t Sum: \t \t \t {:4d}".format(sum_count))
+
+
+def print_smart_report(es, args):
+    smart_total, mystery_total = 0, 0
+    for cluster_counts in smart_counts_per_cluster(es).values():
+        smart, mystery = cluster_counts
+        smart_total += smart
+        mystery_total += mystery
+    print("{}/{} disks had mystery SMART data, {} had normal SMART data"
+          .format(mystery_total, count_disks(es), smart_total))
+
+
+def profile_parser_report(es, args):
+    profile_parser(args.data_directory)
+
+
 if __name__ == '__main__':
     parser = common.make_es_base_parser()
-    parser.add_argument('data_directory', type=str)
-    parser.add_argument('task', type=str, nargs='+',
-                        choices=["incremental_es",
-                                 "disks",
-                                 "smart_stats",
-                                 "profile_parse"])
+    common.add_subcommands(parent=parser,
+                           descriptions=[
+                               ('incremental_es',
+                                "Sync snapshot data to ES",
+                                [
+                                    (['--throttle', '-t'],
+                                     {'type': int,
+                                      'default': 1,
+                                      'help': "upload every Nth record",
+                                      'dest': 'throttle'}),
+                                    (['data_directory'],
+                                     {'type': str}),
+                                ],
+                                make_incremental_es),
+                               ('disks',
+                                "List disks and their values",
+                                [],
+                                print_disks),
+                               ('smart_stats',
+                                "Show statistics about SMART data",
+                                [],
+                                print_smart_report),
+                               ('profile_parse',
+                                "Print profiling data for the file parser",
+                                [],
+                                profile_parser_report),
+                           ])
+
     args = parser.parse_args()
+    daiquiri.setup()
     common.set_log_level_from_args(args, log)
-    es = Elasticsearch(args.es_nodes, timeout=args.timeout)
-    tasks = args.task
-    data_directory = args.data_directory
-
-    if "incremental_es" in tasks:
-        type_fw_index = disk_types_and_serials_from_path(data_directory)
-        parse_into_es(es, index_files(data_directory), type_fw_index)
-
-    if "disks" in tasks:
-        print("Disk count per cluster:")
-        print("\t Clstr \t First \t Last \t Total")
-        print("\t--------------------------------")
-        sum_count = 0
-        for cluster, disks in sorted(es_get_disks(es, index=ES_INDEX).items(),
-                                     key=lambda x: len(x[1]), reverse=True):
-            print("\t {} \t {:2d}.{:2d} \t {:2d}.{:2d} \t {:4d}"
-                  .format(cluster, *disks[0], *disks[-1], len(disks)))
-            sum_count += len(disks)
-        print("\t--------------------------------")
-        print("\t Sum: \t \t \t {:4d}".format(sum_count))
-    if "smart_stats" in tasks:
-        smart_total, mystery_total = 0, 0
-        for cluster_counts in smart_counts_per_cluster(es).values():
-            smart, mystery = cluster_counts
-            smart_total += smart
-            mystery_total += mystery
-
-        print("{}/{} disks had mystery SMART data, {} had normal SMART data"
-              .format(mystery_total, count_disks(es), smart_total))
-
-    if "profile_parse" in tasks:
-        profile_parser(data_directory)
+    es = common.es_conn_from_args(args)
+    common.run_subcommand(args, es=es)

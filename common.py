@@ -40,18 +40,12 @@ def add_elasticsearch_options(parser, default_address):
                         dest='es_nodes',
                         help="Elasticsearch node to connect to",
                         default=default_address)
-    parser.add_argument('--es-sniff', '-i',
-                        help=("Enable ElasticSearch sniffing "
-                              " before connecting and on connection failures"),
-                        action='store_true',
-                        dest="do_es_sniff")
 
 
 def es_conn_from_args(args):
-    es = Elasticsearch([args.es_nodes], timeout=args.timeout,
-                       sniff_on_start=args.do_es_sniff,
-                       sniff_on_connection_fail=args.do_es_sniff,
-                       sniffer_timeout=args.timeout,
+    log.debug("Setting up ES connection using %s", args)
+    es = Elasticsearch([args.es_nodes],
+                       timeout=args.timeout,
                        retry_on_timeout=True,
     )
     return es
@@ -75,7 +69,9 @@ def make_es_base_parser():
 
 def add_subcommands(parent, descriptions):
     subparser_master = parent.add_subparsers(title='operations',
-                                             help="valid operations")
+                                             help="valid operations",
+                                             dest='cmd')
+    subparser_master.required = True
     added_parsers = [subparser_master]
     for description in descriptions:
         name, hlp, args, func = description
@@ -248,3 +244,10 @@ def unique_values_in_dataset(data):
     for x in data:
         print("{}: {}".format(x, ", ".join([str(x)
                                             for x in sorted(set(data[x]))])))
+
+
+def run_subcommand(args, *rest_args, **kwargs):
+    if hasattr(args, "func"):
+        args.func(args=args, *rest_args, **kwargs)
+    else:
+        print("You need to supply a subcommand!")

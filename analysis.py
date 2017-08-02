@@ -23,7 +23,7 @@ import numpy as np
 log = daiquiri.getLogger()
 
 #ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
-ELASTIC_ADDRESS = "localhost:9200"
+#ELASTIC_ADDRESS = "localhost:9200"
 ES_SYSLOG_INDEX = "syslog-*"
 ES_LOWLEVEL_BASE = 'netapp-lowlevel'
 ES_LOWLEVEL_INDEX = '{}-*'.format(ES_LOWLEVEL_BASE)
@@ -760,11 +760,11 @@ def bucket_broken_disks(failure_messages, window_width):
             time_since_last_failure = min([abs(ts - recorded_time)
                                            for recorded_time in
                                            broke_at[cluster][disk]])
-            if time_since_last_failure > ONE_WEEK:
+            if time_since_last_failure > 2 * ONE_WEEK:
                 # If it's been one WEEK since we last observed the disk
                 # breaking, presume it's a new fault.
                 broke_at[cluster][disk].append(ts)
-                log.info("It's been a week -- presume a new failure for %s %s",
+                log.info("It's been two weeks -- presume a new failure for %s %s",
                          cluster, disk)
             else:
                 log.debug("Discarding recent failure for %s %s: %s",
@@ -842,7 +842,7 @@ def get_ll_data(es, cluster, disk, at):
     date at.
     """
     log.debug("Getting low-level data for %s %s close to %s",
-             cluster, disk, str(at))
+              cluster, disk, str(at))
 
     MAX_AGE_HOURS = 2
 
@@ -857,7 +857,7 @@ def get_ll_data(es, cluster, disk, at):
     # Only get the first result
     s = s[0]
 
-    for r in s.scan():
+    for r in s:
         return r.to_dict()
     raise ValueError
 
