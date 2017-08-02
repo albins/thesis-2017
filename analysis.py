@@ -19,6 +19,7 @@ from elasticsearch.helpers import scan
 import dateparser
 import daiquiri
 import numpy as np
+import humanize
 
 log = daiquiri.getLogger()
 
@@ -358,9 +359,52 @@ def get_scrubbing_durations(es):
         try:
             scrubbing_time = data['scrub_seconds']
         except KeyError:
+            log.warning("Scrubbing time duration missing from sample!")
             continue
 
         yield (timestamp, cluster, disk, timedelta(seconds=scrubbing_time))
+
+
+def get_reconstruction_times(es):
+    """
+    Return a list of reconstruction times, in seconds.
+    """
+    # "/aggr1_rac5021/plex0/rg3: reconstruction completed for 1a.23.17 in 0:00.89"
+    time_re = regex.compile(".*reconstruction completed.*in (?<timestring>.*)")
+
+    recons_done_event_type = "raid.rg.recons.done"
+    s = Search(using=es, index=ES_SYSLOG_INDEX)\
+        .filter("term", event_type=recons_done_event_type)
+
+    for doc in s.scan():
+        doc = deserialise_log_entry(doc)
+        preparsed_value = doc.get("recons_seconds", None)
+        if preparsed_value:
+            total_seconds = preparsed_value
+        else:
+            match = time_re.match(doc['body'])
+            if not match or not match['timestring']:
+                log.warning("Log entry didn't match reconstruction time RE!")
+                continue
+
+            time_components = [float(x) for x in match['timestring'].split(":")]
+            if len(time_components) == 2:
+                minutes, seconds = time_components
+                total_seconds = 60 * minutes + seconds
+            elif len(time_components) == 3:
+                hours, minutes, seconds = time_components
+                total_seconds = 60*60*hours + 60 * minutes + seconds
+            else:
+                log.error("Wrong length for time string %d",
+                          len(time_components))
+                continue
+        yield total_seconds
+
+
+def get_disk_copy_times(es):
+    """
+    """
+    pass
 
 
 def get_minmax_scrub_durations(scrub_durations):
@@ -1155,12 +1199,24 @@ def clean_duplicate_blocks(bad_block_data):
     return earliest_seen_block_times.values()
 
 
-def bin_values(values):
+def bin_values(values, bins=12):
     histogram = Counter()
-    ns, bins = np.histogram(values)
-    for i, bin_name in enumerate(bins):
-        histogram[bin_name] = ns[i]
+    counts, bins = np.histogram(values, bins=bins, density=False)
+
+    for i, count in enumerate(counts):
+        bin_name = (bins[i], bins[i+1])
+        histogram[bin_name] = count
     return histogram
+
+
+def stringify_binned_data_pairs(pairs):
+    for (lo, hi), count in pairs:
+        lo_str = humanize.naturaldelta(timedelta(seconds=lo))
+        hi_str = humanize.naturaldelta(timedelta(seconds=hi))
+        if lo_str != hi_str:
+            yield ("{}--{}".format(lo_str, hi_str), count)
+        else:
+            yield("{}".format(lo_str), count)
 
 
 def make_graph(es, args):
@@ -1202,11 +1258,21 @@ def make_graph(es, args):
             histogram[group_on(bad_block_data)] += 1
 
     elif args.graph_type == "reconstruction_time":
-        durations_s = get_reconstruction_times(es)
-        histogram = bin_values(durations_s)
+        durations_s = list(get_reconstruction_times(es))
+        log.info("Loaded %d reconstruction time measurements",
+                 len(durations_s))
+
+        histogram = bin_values(durations_s, bins=5)
 
     elif args.graph_type == "disk_copy_time":
         durations_s = get_disk_copy_times(es)
+        histogram = bin_values(durations_s)
+
+    elif args.graph_type == "scrubbing_time":
+        durations_s = [ts[3].total_seconds()
+                       for ts in get_scrubbing_durations(es)]
+        log.info("Loaded %d scrubbing time duration measurements",
+                 len(durations_s))
         histogram = bin_values(durations_s)
     else:
         assert False, "Unknown graph report %s!" % args.graph_type
@@ -1224,8 +1290,8 @@ def make_graph(es, args):
         data_pairs = sorted(histogram.items(), key=lambda pair: pair[1],
                             reverse=True)
     else:
-        # Alphabetically or by size
-        data_pairs = sorted(histogram.items())
+        # Alphabetically or by bucket size, if it's a number
+        data_pairs = stringify_binned_data_pairs(sorted(histogram.items()))
 
     with args.writefile as f:
         f.write(render_tex_histogram(data_pairs,
@@ -1253,7 +1319,7 @@ if __name__ == '__main__':
                                ('training',
                                 "Generate training data",
                                 [
-                                    (['-w','--writefile'],
+                                    (['-w', '--writefile'],
                                      {'type': argparse.FileType('w'),
                                       'default': '-'}),
                                     (['-t','--type'],
@@ -1285,7 +1351,8 @@ if __name__ == '__main__':
                                        "bad_disks_cluster",
                                        "bad_disks_month",
                                        "reconstruction_time",
-                                       "disk_copy_time"]}),
+                                       "disk_copy_time",
+                                       "scrubbing_time"]}),
                                 ],
                                 make_graph)
 
