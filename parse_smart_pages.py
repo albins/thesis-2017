@@ -508,6 +508,10 @@ def disk_types_and_serials_from_path(path):
                 # Parse the file as CSV
                 with gz.open(full_path, 'rt') as data_fp:
                     reader = csv.DictReader(data_fp, delimiter="+")
+                    # For some reason, we have two header rows, so skip
+                    # the second one too:
+                    next(reader)
+
                     for row in reader:
                         try:
                             disk = disk_to_location(row['disk'])
@@ -1082,23 +1086,22 @@ def estimate_rate(current_rate, min_rate, max_rate, avg_rate):
     return estimate
 
 
-def throttle_gen(vals, keep_every=1):
-    for i, val in enumerate(vals):
-        if i % keep_every == 0:
-            log.debug("Keeping # %d: %d", i, val)
-            yield val
-
-
 def file_index_to_es_data(file_index, last_seen, type_fw_index, throttle=1):
     """
     Generate entries to insert into es_import from a file index and
     high-water-mark dictionary.
     """
-    cluster_ts_filenames = throttle_gen(
-        [triplet for
-         triplet in file_index_to_triplets(file_index)
-         if is_actual(triplet, last_seen)],
-        keep_every=3)
+
+    interesting_triplets = [triplet for
+                            triplet in
+                            file_index_to_triplets(file_index)
+                            if is_actual(triplet, last_seen)]
+
+    cluster_ts_filenames = [t for i, t in enumerate(interesting_triplets)
+                            if i % throttle == 0]
+
+    throttled_count = len(interesting_triplets) - len(cluster_ts_filenames)
+
     total_num_files = sum([len(x) for x in file_index.values()])
     num_files_used = len(cluster_ts_filenames)
     skipped_files = total_num_files - num_files_used
@@ -1108,8 +1111,8 @@ def file_index_to_es_data(file_index, last_seen, type_fw_index, throttle=1):
     max_rate = 0
     average_rate = 0
 
-    log.info("Starting upload of %d files, skipping %d files",
-             num_files_used, skipped_files)
+    log.info("Starting upload of %d files, skipping %d files (%d throttled)",
+             num_files_used, skipped_files, throttled_count)
 
     for i, (cluster, ts, filename) in enumerate(cluster_ts_filenames):
         if i % interval_length == 0 and i != 0:
