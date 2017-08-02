@@ -18,6 +18,7 @@ from elasticsearch_dsl import Search, Q
 from elasticsearch.helpers import scan
 import dateparser
 import daiquiri
+import numpy as np
 
 log = daiquiri.getLogger()
 
@@ -842,10 +843,15 @@ def get_ll_data(es, cluster, disk, at):
     """
     log.debug("Getting low-level data for %s %s close to %s",
              cluster, disk, str(at))
+
+    MAX_AGE_HOURS = 2
+
     s = Search(using=es, index=ES_LOWLEVEL_INDEX)
     s = filter_by_cluster_disk(s, cluster_name=cluster,
                                disk_location=disk)
-    s.filter("range", **{"@timestamp": {'lte': at}})\
+    s.filter("range", **{"@timestamp": {'lte': at,
+                                        'gte':
+                                        at - timedelta(hours=MAX_AGE_HOURS)}})\
      .sort({"@timestamp": {"order": "desc"}})
 
     # Only get the first result
@@ -1149,6 +1155,14 @@ def clean_duplicate_blocks(bad_block_data):
     return earliest_seen_block_times.values()
 
 
+def bin_values(values):
+    histogram = Counter()
+    ns, bins = np.histogram(values)
+    for i, bin_name in enumerate(bins):
+        histogram[bin_name] = ns[i]
+    return histogram
+
+
 def make_graph(es, args):
     histogram = Counter()
     x_label = ""
@@ -1188,9 +1202,12 @@ def make_graph(es, args):
             histogram[group_on(bad_block_data)] += 1
 
     elif args.graph_type == "reconstruction_time":
-        pass
+        durations_s = get_reconstruction_times(es)
+        histogram = bin_values(durations_s)
+
     elif args.graph_type == "disk_copy_time":
-        pass
+        durations_s = get_disk_copy_times(es)
+        histogram = bin_values(durations_s)
     else:
         assert False, "Unknown graph report %s!" % args.graph_type
 

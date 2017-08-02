@@ -390,7 +390,8 @@ if __name__ == '__main__':
 
     if args.do_normalise:
         log.debug("Normalising data...")
-        train_data = common.zhu_2013_normalise(train_data)
+        with common.timed(task_name="normalisation"):
+            train_data = common.zhu_2013_normalise_fast(train_data)
         log.debug("Done normalising data")
 
     ok, broken = common.split_disk_data(train_data)
@@ -398,6 +399,7 @@ if __name__ == '__main__':
     if not args.dont_shuffle:
         np.random.shuffle(ok)
         np.random.shuffle(broken)
+        log.debug("Shuffled dataset")
     ok = common.remove_labels(ok)
     broken = common.remove_labels(broken)
     log.info("Finished pre-processing data")
