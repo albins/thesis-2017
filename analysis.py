@@ -35,7 +35,7 @@ FAIL_REASONS = ["raid.config.filesystem.disk.failed",
                 "disk.partner.diskFail",
                 "raid.fdr.fail.disk.sick",
                 "raid.fdr.reminder"]
-TROUBLE_REASONS =  [
+TROUBLE_REASONS = [
     "disk.write.failure",
     "scsi.cmd.aborted",
     "scsi.cmd.notReadyCondition",
@@ -75,6 +75,19 @@ HARD_FAILURE_INDICATORS = ["raid.fdr.reminder",
                            "raid.disk.missing",
                            "raid.disk.unload.done"]
 
+FAILURE_PREDICTION_EVENT_TYPES = [
+    "raid.disk.predictiveFailure",
+    "raid.disk.maint.start",
+    "raid.disk.maint.done",
+    "raid.disk.maint.failed",
+    "raid.rg.diskcopy.aborted",
+    "raid.rg.diskcopy.read.err",
+    "raig.rg.diskcopy.cant.start",
+    "raid.rg.diskcopy.done",
+    "raid.rg.diskcopy.start",
+    ]
+
+
 ONE_WEEK = timedelta(hours=7*24)
 UTC_NOW =  datetime.fromtimestamp(time.time(), tz=pytz.utc)
 TIME_BEFORE_FAILURE = timedelta(hours=2)
@@ -91,6 +104,8 @@ Q_TROUBLE_EVENTS = Q("bool", should=[*[Q('match', event_type=t)
 Q_FAIL_EVENTS = Q("bool", should=[Q('match', event_type=t)
                                      for t in FAIL_REASONS],
                      minimum_should_match=1)
+
+
 Q_JUNK_EVENTS = Q('term', event_type="cf.disk.skipped")
 
 DISK_FAIL_Q = " OR ".join(["event_type: {}".format(e) for e in FAIL_REASONS])
@@ -737,7 +752,6 @@ def was_predicted(es, failure_document):
             # restarted?
             return False
 
-
     return prefail_msg if prefail_msg else False
 
 
@@ -810,34 +824,108 @@ def get_disk_failures(es):
 def get_failure_predictions(es):
     """
     Generate predictions for failures according to the logs, as a tuple:
-    (disk location, cluster, first prediction time, event type)
+    (disk location, cluster, first prediction time, log document)
+
+
+    The following events indicate that a prediction has happened:
+    - raid.disk.predictiveFailure (disk was prefailed)
+    - raid.disk.maint.start (maintenance mode started)
+    - raid.disk.maint.done (maintenance mode passed)
+    - raid.disk.maint.failed (disk failed in maintenance mode)
+
+
+    Or if the filer attempted to start the disk copy process:
+    - raid.rg.diskcopy.aborted (copying disk during prefail failed)
+    - raid.rg.diskcopy.read.err (read error during prefail)
+    - raig.rg.diskcopy.cant.start
+    - raid.rg.diskcopy.done
+    - raid.rg.diskcopy.start
     """
-    return []
+
+    seen = set()
+
+    # Match any of the event types in the list
+    q = Q("bool", should=[Q('match', event_type=t)
+                          for t in FAILURE_PREDICTION_EVENT_TYPES],
+          minimum_should_match=1)
+
+    s = Search(using=es)\
+        .query(q)\
+        .sort({"@timestamp": {"order": "asc"}})
+
+    for data_point in s.scan():
+        doc = deserialise_log_entry(data_point)
+        disk = doc['disk_location']
+        cluster = doc['cluster_name']
+
+        if not (disk, cluster) in seen:
+            seen.add((disk, cluster))
+            log.info("found a failure prediction %s for %s %s at %s",
+                     doc['event_type'], disk, cluster, doc['@timestamp'])
+            yield disk, cluster, doc['@timestamp'], doc
+
+
+def successfully_copied(es, cluster, disk_location, before, after):
+    """
+    Return True if a given disk was successfully copied inside a given
+    time window.
+
+    Look for raid.rg.diskcopy.done or raid.rg.diskcopy.aborted within
+    the timeframe.
+    """
+    q = Q("bool", should=[Q('match', event_type=t)
+                          for t in ["raid.rg.diskcopy.done",
+                                    "raid.rg.diskcopy.aborted"]],
+          minimum_should_match=1)
+
+    s = Search(using=es)\
+        .query(q)
+
+    # Sort by timestamp is implied by windowing
+    s = filter_by_cluster_disk(windowed_query(s, start=after, end=before),
+                               cluster_name=cluster,
+                               disk_location=disk_location)
+
+    for data_point in s.scan():
+        doc = deserialise_log_entry(data_point)
+        event_type = doc['event_type']
+
+        if event_type == "raid.rg.diskcopy.done":
+            log.info("Found successful copy for %s %s at %s",
+                     cluster, disk_location, doc['@timestamp'])
+            return True
+        elif event_type == "raid.rg.diskcopy.aborted":
+            log.info("Found aborted disk copy for %s %s at %s",
+                     cluster, disk_location, doc['@timestamp'])
+            return False
+
+    # No news is bad news
+    return False
 
 
 def print_prediction_stats(es):
-    true_positives = set()
-    false_negatives = set()
     false_positives = set()
+    correctly_predicted_drives = set()
     failed_drives = defaultdict(lambda: UTC_NOW)
-    predicted_drives = set()
+    attempted_predicted_drives = set()
+    prediction_windows = []
 
     for disk_location, cluster, first_failure_time in get_disk_failures(es):
         drive_identifier = (cluster, disk_location)
         predicted = False
 
         if first_failure_time <= failed_drives[drive_identifier]:
-            log.info("%s logged as failed at %s",
-                     drive_identifier, first_failure_time)
+            log.info("%s %s logged as failed at %s",
+                     *drive_identifier, first_failure_time)
             failed_drives[drive_identifier] = first_failure_time
 
-    for disk_location, cluster, first_prediction_time, event_type in \
+    for disk_location, cluster, first_prediction_time, log_entry in \
         get_failure_predictions(es):
         drive_identifier = (cluster, disk_location)
-        predicted_drives.add(drive_identifier)
+        attempted_predicted_drives.add(drive_identifier)
 
         if drive_identifier not in failed_drives:
-            log.info("%s never failed -- false positive", drive_identifier)
+            log.info("%s %s never failed -- false positive", *drive_identifier)
             false_positives.add(drive_identifier)
             continue
 
@@ -845,30 +933,47 @@ def print_prediction_stats(es):
         if successfully_copied(es, cluster, disk_location,
                                before=failed_ts,
                                after=first_prediction_time):
-            log.info("disk %s was successfully copied before failing!",
-                     drive_identifier)
-            true_positives.add(drive_identifier)
+            log.info("disk %s %s was successfully copied before failing!",
+                     *drive_identifier)
+            correctly_predicted_drives.add(drive_identifier)
             continue
 
         time_window = failed_ts - first_prediction_time
-        if time_window >= timedelta(hours=8):
-            log.info("large enough window -- presuming true positive for %s",
-                     drive_identifier)
-            true_positives.add(drive_identifier)
+        prediction_windows.append(time_window)
+        # Time window chosen because this is the most common copy time
+        if time_window >= timedelta(hours=12):
+            log.info("long enough window -- presuming true positive for %s %s",
+                     *drive_identifier)
+            correctly_predicted_drives.add(drive_identifier)
         else:
-            log.info("%s prediction gave %s warning -- too little!",
-                     drive_identifier,
+            log.info("%s %s prediction gave %s warning -- too little!",
+                     *drive_identifier,
                      time_window)
             false_positives.add(drive_identifier)
 
     log.info("Failed drives were: %s",
-             ", ".join([str(x) for x in failed_drives.keys()]))
+             ", ".join(["%s %s" % x for x in failed_drives.keys()]))
     log.info("Predicted to fail were %s",
-             ", ".join([str[x] for x in predicted_drives]))
+             ", ".join(["%s %s" % x for x in attempted_predicted_drives]))
 
     # all disks, except those predicted to fail and those that did fail
     every_disk = set([(c, l) for c, l, _d in all_disks(es)])
-    true_negatives = every_disk - predicted_drives - set(failed_drives.keys())
+    true_negatives = every_disk - correctly_predicted_drives - set(failed_drives.keys())
+
+    # all correctly predicted drives that actually failed
+    true_positives = correctly_predicted_drives & set(failed_drives.keys())
+    log.info("True positives were %s",
+             ", ".join(["%s %s" % x for x in true_positives]))
+    log.info("False positives were %s",
+             ", ".join(["%s %s" % x for x in false_positives]))
+
+    # all failed drives that was not predicted
+    false_negatives = set(failed_drives.keys()) - correctly_predicted_drives
+    log.info("False negatives were %s",
+             ", ".join(["%s %s" % x for x in false_negatives]))
+
+    log.info("Prediction windows were %s",
+             ", ".join([str(x) for x in sorted(set(prediction_windows))]))
 
     tpr, far = common.calculate_tpr_far(len(true_positives),
                                         len(true_negatives),
@@ -941,12 +1046,15 @@ def all_disks(es):
         if not (cluster, disk) in disks:
             log.debug("Found new data for %s %s. Got %d/%d entries so far",
                       cluster, disk, found_disks, disk_count)
-            disks.add(cluster, disk)
+            disks.add((cluster, disk))
             found_disks += 1
             yield (cluster, disk, data)
         else:
             log.debug("Ignoring data for %s %s. Got %d entries so far",
                       cluster, disk, found_disks)
+
+    assert found_disks == disk_count, "Expected to find %d disks, got %d" \
+        % (disk_count, found_disks)
 
 
 def get_disks(es):
