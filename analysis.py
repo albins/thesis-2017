@@ -23,6 +23,8 @@ import humanize
 
 log = daiquiri.getLogger()
 
+seen_ids = defaultdict(list)
+
 #ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
 #ELASTIC_ADDRESS = "localhost:9200"
 ES_SYSLOG_INDEX = "syslog-*"
@@ -90,7 +92,7 @@ FAILURE_PREDICTION_EVENT_TYPES = [
 
 ONE_WEEK = timedelta(hours=7*24)
 UTC_NOW =  datetime.fromtimestamp(time.time(), tz=pytz.utc)
-TIME_BEFORE_FAILURE = timedelta(hours=2)
+TIME_BEFORE_FAILURE = timedelta(hours=12)
 RECORDING_START = datetime(year=2017, month=5, day=31,
                            hour=13, tzinfo=pytz.utc)
 WINDOW_SIZE = timedelta(hours=24)
@@ -164,7 +166,7 @@ def flatten(lst):
     return sum(lst, [])
 
 
-def windowed_query(s, start=None, end=UTC_NOW):
+def windowed_query(s, start=None, end=UTC_NOW, sort="asc"):
     """
     Window a query for a time interval [x, y[.
     """
@@ -172,7 +174,7 @@ def windowed_query(s, start=None, end=UTC_NOW):
     time_range = {'gte': start} if start else {}
     time_range['lt'] = end
 
-    s = s.sort({"@timestamp": {"order": "asc"}})\
+    s = s.sort({"@timestamp": {"order": sort}})\
         .filter("range", **{'@timestamp': time_range})
     return s
 
@@ -1099,12 +1101,11 @@ def get_ll_data(es, cluster, disk, at):
     MAX_AGE_HOURS = 2
 
     s = Search(using=es, index=ES_LOWLEVEL_INDEX)
-    s = filter_by_cluster_disk(s, cluster_name=cluster,
-                               disk_location=disk)
-    s.filter("range", **{"@timestamp": {'lte': at,
-                                        'gte':
-                                        at - timedelta(hours=MAX_AGE_HOURS)}})\
-     .sort({"@timestamp": {"order": "desc"}})
+    s = windowed_query(filter_by_cluster_disk(s, cluster_name=cluster,
+                                              disk_location=disk),
+                       start=at - timedelta(hours=MAX_AGE_HOURS),
+                       end=at,
+                       sort="desc")
 
     # Only get the first result
     s = s[0]
@@ -1152,6 +1153,16 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
 
     at = start if start else end
     disk_data = get_ll_data(es, cluster, disk, at=at)
+
+    ll_data_id = disk_data['@timestamp']
+    log.debug("Used low-level data from %s", ll_data_id)
+
+    if ll_data_id in seen_ids[(cluster, disk)]:
+        log.warning("Low-level data %s repeated for %s %s",
+                    ll_data_id, cluster, disk)
+
+    seen_ids[(cluster, disk)].append(ll_data_id)
+
     smart_values = normalise_smart_values(disk_data)
     smart_mystery_data = flatten(disk_data['smart_mystery']) if \
                          disk_data['smart_mystery'] \
@@ -1343,8 +1354,8 @@ def prepare_training_data(es, bad_blocks=False):
                                                fault_timestamps=faults)
                 yield this_window
             except Exception as e:
-                log.error("Error %s rendering time windows for disk %s %s. Skipping it!",
-                          str(e), cluster, disk_label)
+                log.error("Error %s rendering time window [%s, %s] for disk %s %s. Skipping it!",
+                          str(e), start, end, cluster, disk_label)
                 continue
             previous_window = this_window
 
