@@ -1098,7 +1098,7 @@ def get_ll_data(es, cluster, disk, at):
     log.debug("Getting low-level data for %s %s close to %s",
               cluster, disk, str(at))
 
-    MAX_AGE_HOURS = 2
+    MAX_AGE_HOURS = 5
 
     s = Search(using=es, index=ES_LOWLEVEL_INDEX)
     s = windowed_query(filter_by_cluster_disk(s, cluster_name=cluster,
@@ -1112,7 +1112,8 @@ def get_ll_data(es, cluster, disk, at):
 
     for r in s:
         return r.to_dict()
-    raise ValueError
+    raise ValueError("No fresh data available for {} {} around {}"
+                     .format(cluster, disk, str(at)))
 
 
 def normalise_smart_values(disk_data):
@@ -1354,8 +1355,7 @@ def prepare_training_data(es, bad_blocks=False):
                                                fault_timestamps=faults)
                 yield this_window
             except Exception as e:
-                log.error("Error %s rendering time window [%s, %s] for disk %s %s. Skipping it!",
-                          str(e), start, end, cluster, disk_label)
+                log.exception("Error rendering time window [%s, %s] for disk %s %s. Skipping it!", start, end, cluster, disk_label)
                 continue
             previous_window = this_window
 
