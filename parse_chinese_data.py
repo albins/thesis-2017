@@ -126,14 +126,8 @@ def verify_training(clf, verification_set, expected_labels):
                 else:
                     false_positives += 1
 
-    if true_positives + false_negatives == 0:
-        tpr = 0
-    else:
-        tpr = true_positives/(true_positives + false_negatives)
-    if true_negatives + false_positives == 0:
-        far = 1
-    else:
-        far = false_positives / (true_negatives + false_positives)
+    tpr, far = common.calculate_tpr_far(true_positives, true_negatives,
+                                        false_positives, false_negatives)
     log.debug("False positives: %d, false negatives: %d, true positives: %d, true negatives: %d",
              false_positives, false_negatives, true_positives, true_negatives)
     return tpr, far, clf

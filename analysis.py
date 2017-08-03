@@ -795,25 +795,95 @@ def non_troubles(es, cluster_name, disk_name, before="now"):
         yield deserialise_log_entry(r)
 
 
+def get_disk_failures(es):
+    """
+    Generate a list of failed drives according to the logs, as a tuple:
+    (disk location, cluster name, earliest recorded failure time)
+    """
+    broken_disk_events = bucket_broken_disks(get_broken_disks(es))
+
+    for cluster_name, cluster_disks in broken_disk_events.items():
+        for disk_location, failure_events in cluster_disks.items():
+            yield (disk_location, cluster_name, sorted(failure_events)[0])
+
+
+def get_failure_predictions(es):
+    """
+    Generate predictions for failures according to the logs, as a tuple:
+    (disk location, cluster, first prediction time, event type)
+    """
+    return []
+
+
 def print_prediction_stats(es):
+    true_positives = set()
+    false_negatives = set()
+    false_positives = set()
+    failed_drives = defaultdict(lambda: UTC_NOW)
+    predicted_drives = set()
 
-    # identify failed drives
-    # for each such drive, determine if it was failed
-    # determine if the drive was predicted
+    for disk_location, cluster, first_failure_time in get_disk_failures(es):
+        drive_identifier = (cluster, disk_location)
+        predicted = False
 
-    # identify mispredictions
+        if first_failure_time <= failed_drives[drive_identifier]:
+            log.info("%s logged as failed at %s",
+                     drive_identifier, first_failure_time)
+            failed_drives[drive_identifier] = first_failure_time
 
-    # Prediction count: count of predicted drives
-    # Failure count: number of failed drives
-    # True positive rate: number of correctly predicted drives/number of failed drives
-    # False positive rate: count of predicted / count of all predictions
-    pass
+    for disk_location, cluster, first_prediction_time, event_type in \
+        get_failure_predictions(es):
+        drive_identifier = (cluster, disk_location)
+        predicted_drives.add(drive_identifier)
+
+        if drive_identifier not in failed_drives:
+            log.info("%s never failed -- false positive", drive_identifier)
+            false_positives.add(drive_identifier)
+            continue
+
+        failed_ts = failed_drives[drive_identifier]
+        if successfully_copied(es, cluster, disk_location,
+                               before=failed_ts,
+                               after=first_prediction_time):
+            log.info("disk %s was successfully copied before failing!",
+                     drive_identifier)
+            true_positives.add(drive_identifier)
+            continue
+
+        time_window = failed_ts - first_prediction_time
+        if time_window >= timedelta(hours=8):
+            log.info("large enough window -- presuming true positive for %s",
+                     drive_identifier)
+            true_positives.add(drive_identifier)
+        else:
+            log.info("%s prediction gave %s warning -- too little!",
+                     drive_identifier,
+                     time_window)
+            false_positives.add(drive_identifier)
+
+    log.info("Failed drives were: %s",
+             ", ".join([str(x) for x in failed_drives.keys()]))
+    log.info("Predicted to fail were %s",
+             ", ".join([str[x] for x in predicted_drives]))
+
+    # all disks, except those predicted to fail and those that did fail
+    every_disk = set([(c, l) for c, l, _d in all_disks(es)])
+    true_negatives = every_disk - predicted_drives - set(failed_drives.keys())
+
+    tpr, far = common.calculate_tpr_far(len(true_positives),
+                                        len(true_negatives),
+                                        len(false_positives),
+                                        len(false_negatives))
+    print("System predictions had a TPR of {} and a FAR of {}"
+          .format(tpr, far))
 
 
-def bucket_broken_disks(failure_messages, window_width):
+def bucket_broken_disks(failure_messages, window_width=ONE_WEEK):
     """
     return a mapping of cluster name -> disk name -> [t0, t1, ... tn]
     for times the disk broke.
+
+    Presume new failure if more time than window_with has passed
     """
     # cluster -> disk -> [t0, t1, ... tn]
     broke_at = defaultdict(lambda: defaultdict(list))
@@ -829,21 +899,24 @@ def bucket_broken_disks(failure_messages, window_width):
             time_since_last_failure = min([abs(ts - recorded_time)
                                            for recorded_time in
                                            broke_at[cluster][disk]])
-            if time_since_last_failure > 2 * ONE_WEEK:
+            if time_since_last_failure > window_width:
                 # If it's been one WEEK since we last observed the disk
                 # breaking, presume it's a new fault.
                 broke_at[cluster][disk].append(ts)
-                log.info("It's been two weeks -- presume a new failure for %s %s",
-                         cluster, disk)
+                log.info("It's been >%s -- presume a new failure for %s %s",
+                         window_width, cluster, disk)
             else:
                 log.debug("Discarding recent failure for %s %s: %s",
                           cluster, disk, time_since_last_failure)
     return broke_at
 
 
-def get_disks(es):
-    broke_at = bucket_broken_disks(get_broken_disks(es),
-                                   window_width=ONE_WEEK)
+def all_disks(es):
+    """
+    Generate data for each disk in the shape of cluster, disk,
+    low-level-data.
+    """
+    disks = set()
 
     ok_index = "{}-2017-06-21*".format(ES_LOWLEVEL_BASE)
     search_start = datetime(2017, 6, 21, tzinfo=pytz.utc)
@@ -853,8 +926,6 @@ def get_disks(es):
         .filter("range", **{'@timestamp':
                             {'gte': search_start,
                              'lte': search_end}})
-
-    cluster_disks = defaultdict(dict)
     found_disks = 0
     disk_count = count_disks(es)
 
@@ -862,30 +933,34 @@ def get_disks(es):
         if found_disks >= disk_count:
             log.info("Found data for all disks -- bailing out!")
             break
+
         data = res.to_dict()
         cluster = data['cluster_name']
         disk = data['disk_location']
-        c_broken_count = len(broke_at.get(cluster, {}))
 
-        if not disk in cluster_disks[cluster]:
+        if not (cluster, disk) in disks:
             log.debug("Found new data for %s %s. Got %d/%d entries so far",
                       cluster, disk, found_disks, disk_count)
-            broke_data = sorted(broke_at[cluster][disk]) if disk in broke_at[cluster]\
-                         else None
-            disk_type = data['type']
-            cluster_disks[cluster][disk] = {'cluster_name': cluster,
-                                            'disk_location': disk,
-                                            'broke_at': broke_data,
-                                            'type': normalise_type(disk_type),
-                                            'c_broken_count': c_broken_count}
+            disks.add(cluster, disk)
             found_disks += 1
+            yield (cluster, disk, data)
         else:
             log.debug("Ignoring data for %s %s. Got %d entries so far",
                       cluster, disk, found_disks)
 
-    for cluster_data in cluster_disks.values():
-        for disk_data in cluster_data.values():
-            yield disk_data
+
+def get_disks(es):
+    broke_at = bucket_broken_disks(get_broken_disks(es),
+                                   window_width=ONE_WEEK)
+    for cluster, disk, data in all_disks(es):
+        broke_data = sorted(broke_at[cluster][disk]) \
+                     if disk in broke_at[cluster] else None
+        yield {'cluster_name': cluster,
+               'disk_location': disk,
+               'broke_at': broke_data,
+               'type': normalise_type(data['type']),
+               'c_broken_count': len(broke_at.get(cluster, {})),
+               }
 
 
 def get_read_error_count(es, cluster, disk, at):

@@ -46,7 +46,7 @@ def es_conn_from_args(args):
     log.debug("Setting up ES connection using %s", args)
     es = Elasticsearch([args.es_nodes],
                        timeout=args.timeout,
-                       retry_on_timeout=True,
+                       #retry_on_timeout=True,
     )
     return es
 
@@ -251,3 +251,17 @@ def run_subcommand(args, *rest_args, **kwargs):
         args.func(args=args, *rest_args, **kwargs)
     else:
         print("You need to supply a subcommand!")
+
+
+def calculate_tpr_far(true_positives, true_negatives,
+                      false_positives, false_negatives):
+    if true_positives + false_negatives == 0:
+        tpr = 0
+    else:
+        tpr = true_positives/(true_positives + false_negatives)
+    if true_negatives + false_positives == 0:
+        far = 1
+    else:
+        far = false_positives / (true_negatives + false_positives)
+
+    return tpr, far
