@@ -126,6 +126,17 @@ SMART_FIELDS = [ # from zhu, 2013
     195,
     197,
 ]
+SMART_NAMES = {1: "read_error_rate_raw",
+               3: "spin_up_time_raw",
+               5: "reallocated_sectors_count_raw",
+               7: "seek_error_rate_raw",
+               9: "power_on_hours_raw",
+               187: "reported_uncorrectable_errors_raw",
+               189: "high_fly_writes_raw",
+               194: "temperature_celsius_raw",
+               195: "hardware_ECC_recovered_raw",
+               197: "current_pending_sector_count_raw",
+}
 SMART_MYSTERY_FIELDS_KEEP = [23, 24, 27, 28, 32, 43, 44, 45, 46, 47, 48,
                              51, 52, 53, 54, 55, 56, 89, 90, 94]
 SENSE_FIELDS_KEEP = [1, 3]
@@ -1367,7 +1378,8 @@ def make_training_data(es, args):
                         "bad_block_stdev",
                         "trouble_log_count",
                         "read_error_count",
-                        *["smart_raw_%d" % f for f in SMART_FIELDS],
+                        *["smart_raw_%s" % SMART_NAMES[f] for f in
+                          SMART_FIELDS],
                         *["smart_mystery_%d" % f for f in
                           SMART_MYSTERY_FIELDS_KEEP],
                         "cpio_blocks_read",

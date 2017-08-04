@@ -101,42 +101,11 @@ def clean_line(line):
     return line[2:]
 
 
-def verify_training(clf, verification_set, expected_labels):
-    false_positives = 0
-    false_negatives = 0
-    true_positives = 0
-    true_negatives = 0
-
-    with timed(task_name="verification"):
-        for prediction, expected in zip(clf.predict(verification_set),
-                                        expected_labels):
-            if prediction == expected:
-                #log.debug("Found correct prediction of %s",
-                #          common.NUM_TO_PREDICTION[prediction])
-                if expected == common.PREDICT_FAIL:
-                    true_positives += 1
-                else:
-                    true_negatives += 1
-            else:
-                #log.debug("Found misprediction, got %s expected %s",
-                #          common.NUM_TO_PREDICTION[prediction],
-                #          common.NUM_TO_PREDICTION[expected])
-                if expected == common.PREDICT_FAIL:
-                    false_negatives += 1
-                else:
-                    false_positives += 1
-
-    tpr, far = common.calculate_tpr_far(true_positives, true_negatives,
-                                        false_positives, false_negatives)
-    log.debug("False positives: %d, false negatives: %d, true positives: %d, true negatives: %d",
-             false_positives, false_negatives, true_positives, true_negatives)
-    return tpr, far, clf
-
-
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
             classifier=tree.DecisionTreeClassifier):
     time_record = []
-    with timed(task_name="Partition results", time_record=time_record, printer=print):
+    with timed(task_name="Partition results", time_record=time_record,
+               printer=print):
         training_broken, witheld_broken = sample_dict(broken,
                                                       keep_portion=keep_broken)
         training_ok, witheld_ok = sample_dict(ok_disks,
@@ -158,8 +127,9 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
 
 
 def generate_roc_graph(broken, ok,
-                       target_file="../Report/Graphs/roc_graph.tex",
-                       predict=predict, start_percentage=1,
+                       target_file="../Report/Graphs/roc_graph.pdf",
+                       predict=predict,
+                       start_percentage=1,
                        stop_percentage=75,
                        step_size=5,
                        broken_percent=75):
@@ -172,26 +142,7 @@ def generate_roc_graph(broken, ok,
                                              predict=predict))
 
     print(sorted(xs_and_ys))
-    ys, xs, _vals = zip(*xs_and_ys)
-
-    with open(target_file, 'w') as f:
-       f.write(TEX_PREAMBLE)
-       for tpr, far, value in xs_and_ys:
-           line = "({}, {}) [{}]\n".format(far, tpr, round(value * 100))
-           f.write(line)
-       f.write(TEX_POST_STUFF)
-
-
-def tree_as_pdf(t, target_file, feature_names, class_names):
-    import pydotplus
-    dot_data = tree.export_graphviz(t, out_file=None,
-                                    feature_names=feature_names,
-                                    class_names=class_names,
-                                    rounded=True,
-                                    filled=True,
-                                    special_characters=True)
-    graph = pydotplus.graph_from_dot_data(dot_data)
-    graph.write_pdf(target_file)
+    ys, xs, vals = zip(*xs_and_ys)
 
 
 def render_tree_pdf(broken, ok_disks, keep_nonbroken):

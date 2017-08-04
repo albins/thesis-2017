@@ -200,7 +200,10 @@ def split_disk_data(disk_data):
     and not normalised.
     """
 
-    last_nonbroken_row = np.where(disk_data[:, 0]== 1.)[0][0]
+    last_nonbroken_row = np.where(disk_data[:, 0] == 1.)[0][0]
+    log.info("Splitting matrix of size %dx%d at %d",
+             *disk_data.shape, last_nonbroken_row)
+
     nonbroken = disk_data[:last_nonbroken_row]
     broken = disk_data[last_nonbroken_row:]
     return nonbroken, broken
@@ -232,7 +235,13 @@ def read_zhu_2013_data(delete_serials=True):
 def zhu_2013_training_set():
     data = read_zhu_2013_data(delete_serials=True)
     matrix_data = data.as_matrix()
-    matrix_data[matrix_data[:,0].argsort()]
+    # Zhu, 2013 uses -1 to demarcate broken, 1 for OK. We need to change
+    # that to 0 for OK, 1 for broken (our convention)
+    # abs() is there because otherwise we get -0, a very scary
+    # proposition.
+    matrix_data[:, 0] = abs((matrix_data[:, 0] - 1)/-2)
+
+    matrix_data = matrix_data[matrix_data[:, 0].argsort()]
     return matrix_data
 
 
@@ -240,7 +249,7 @@ def random_training_set(count, features):
     random_array = np.random.random(size=(count, features))
     broken_or_ok_column = np.random.randint(0, 2, size=(count, 1))
     training_data = np.append(broken_or_ok_column, random_array, 1)
-    training_data[training_data[:,0].argsort()]
+    training_data = training_data[training_data[:,0].argsort()]
     return training_data
 
 
@@ -323,3 +332,90 @@ def render_pyplot_bar_chart(data_pairs, x_label, y_label, file_name,
         plt.tight_layout()
 
         pp.savefig()
+
+
+def render_pyplot_scatter_plot(xs, ys, data_labels, file_name,
+                               x_label="", y_label=""):
+    colours = random_cycle_list(palettable.wesanderson.Moonrise1_5.mpl_colors)
+
+    with PdfPages(file_name) as pp:
+        fig, ax = plt.subplots()
+        plt.scatter(x=xs, y=ys, c=colours)
+
+        for i, txt in enumerate(data_labels):
+            ax.annotate(txt, (xs[i], ys[i]), fontsize='xx-small')
+
+        ax.set_ylabel(y_label)
+        ax.set_xlabel(x_label)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        plt.tight_layout()
+        pp.savefig()
+
+
+def tree_as_pdf(t, target_file, feature_names, class_names):
+    import pydotplus
+    dot_data = tree.export_graphviz(t, out_file=None,
+                                    feature_names=feature_names,
+                                    class_names=class_names,
+                                    rounded=True,
+                                    filled=True,
+                                    special_characters=True)
+    graph = pydotplus.graph_from_dot_data(dot_data)
+    graph.write_pdf(target_file)
+
+
+def make_roc_measurements(broken,
+                          ok,
+                          predict,
+                          start_percentage=1,
+                          stop_percentage=75,
+                          step_size=5,
+                          broken_percent=75):
+    xs_and_ys = []
+
+    for n in range(start_percentage, stop_percentage + 1, step_size):
+        log.debug("Calculating ROC values for %d%%", n)
+        xs_and_ys.append(calculate_roc_point(n, broken, ok,
+                                             broken_percent=broken_percent,
+                                             predict=predict))
+
+    ys, xs, vals = zip(*xs_and_ys)
+    return xs, ys, vals
+
+
+def calculate_roc_point(n, broken, ok, predict, broken_percent):
+    percentage = 0.01 * n
+    tpr, far, _tree = predict(broken, ok, keep_broken=broken_percent/100,
+                              keep_nonbroken=percentage)
+    return tpr, far, n
+
+
+def verify_training(clf, verification_set, expected_labels):
+    false_positives = 0
+    false_negatives = 0
+    true_positives = 0
+    true_negatives = 0
+
+    with timed(task_name="verification"):
+        for prediction, expected in zip(clf.predict(verification_set),
+                                        expected_labels):
+            if prediction == expected:
+                if expected == PREDICT_FAIL:
+                    true_positives += 1
+                else:
+                    true_negatives += 1
+            else:
+                if expected == PREDICT_FAIL:
+                    false_negatives += 1
+                else:
+                    false_positives += 1
+
+    tpr, far = calculate_tpr_far(true_positives, true_negatives,
+                                 false_positives, false_negatives)
+    log.debug("False positives: %d, false negatives: %d, true positives: %d, true negatives: %d. TPR: %f, FAR: %f",
+              false_positives, false_negatives,
+              true_positives, true_negatives,
+              tpr, far)
+    return tpr, far, clf
