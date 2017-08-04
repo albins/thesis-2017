@@ -4,9 +4,13 @@ import time
 import logging
 import pandas
 import math
+import random
 
 import numpy as np
 from elasticsearch import Elasticsearch
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+import palettable
 
 log = logging.getLogger(__name__)
 
@@ -265,3 +269,57 @@ def calculate_tpr_far(true_positives, true_negatives,
         far = false_positives / (true_negatives + false_positives)
 
     return tpr, far
+
+
+def random_cycle_list(lst):
+    split_at = random.randint(0, len(lst)-2)
+    fst, snd = lst[:split_at], lst[split_at:]
+    return [*snd, *fst]
+
+
+def render_pyplot_bar_chart(data_pairs, x_label, y_label, file_name,
+                            label_rotation=0, font_size='small',
+                            show_every_nth_label=1):
+    ticks, xs = zip(*data_pairs)
+
+    x = np.arange(len(ticks))
+
+    def autolabel(rects, ax):
+        """
+        Attach a text label above each bar displaying its height
+        """
+        for rect in rects:
+            height = rect.get_height()
+            if height > 0:
+                ax.text(rect.get_x() + rect.get_width()/2., 1.005*height,
+                        '%d' % int(height),
+                        ha='center', va='bottom',
+                        fontsize='xx-small')
+
+    def hide_tick_labels(ax):
+        for i, label in enumerate(ax.xaxis.get_ticklabels()):
+            if i % show_every_nth_label == 0:
+                continue
+            else:
+                label.set_visible(False)
+
+    colours = random_cycle_list(palettable.wesanderson.Moonrise1_5.mpl_colors)
+
+    with PdfPages(file_name) as pp:
+        fig, ax = plt.subplots()
+        rects = plt.bar(x,
+                        xs,
+                        color=colours)
+
+        ax.set_ylabel(y_label)
+        ax.set_xlabel(x_label)
+        ax.set_xticks(x)
+        ax.set_xticklabels(ticks, rotation=label_rotation,
+                           fontsize=font_size)
+
+        autolabel(rects, ax)
+        hide_tick_labels(ax)
+
+        plt.tight_layout()
+
+        pp.savefig()

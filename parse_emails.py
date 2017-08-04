@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from common import timed, format_counter
+from common import timed, format_counter, render_pyplot_bar_chart
 
 import mailbox
 import tempfile
@@ -355,14 +355,14 @@ def analyse_data(results):
 
 
 def make_month_histogram(analysis, location):
-    target_file = os.path.join(location, "email_fails_per_month.tex")
+    target_file = os.path.join(location, "email_fails_per_month.pdf")
     tuples = [("{} {}".format(year, month), count) for (year, _month_ord, month), count
               in sorted(analysis['fails_per_month'].items())]
-    with open(target_file, 'w') as f:
-        f.write(render_tex_histogram(tuples=tuples,
-                                     x_label="",
-                                     y_label="Number of failures",
-                                     bar_width="8pt"))
+    render_pyplot_bar_chart(tuples,
+                            file_name=target_file,
+                            x_label="",
+                            y_label="Number of disk failures",
+                            label_rotation=45)
 
 def render_tex_histogram(tuples, x_label, y_label, bar_width):
     lines = []
@@ -378,14 +378,12 @@ def render_tex_histogram(tuples, x_label, y_label, bar_width):
 
 
 def make_cluster_histogram(analysis, location):
-    target_file = os.path.join(location, "email_fails_per_cluster.tex")
-
-    with open(target_file, 'w') as f:
-        f.write(render_tex_histogram(
-            tuples=analysis['cluster_status'].most_common(),
-            x_label="Cluster",
-            y_label="Number of Disk Failures",
-            bar_width="20pt"))
+    target_file = os.path.join(location, "email_fails_per_cluster.pdf")
+    render_pyplot_bar_chart(
+        analysis['cluster_status'].most_common(),
+        file_name=target_file,
+        x_label="Cluster",
+        y_label="Number of Disk Failures")
 
 
 if __name__ == '__main__':

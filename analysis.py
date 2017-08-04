@@ -1243,7 +1243,7 @@ def make_report(es, args):
 def make_bad_block_data_slice(es, disk, window_end):
     window_start_dates = [window_end - dur for dur in
                           [timedelta(hours=12),
-                               timedelta(hours=48), ONE_WEEK]]
+                           timedelta(hours=48), ONE_WEEK]]
     disk_label = disk['disk_location']
     cluster = disk['cluster_name']
 
@@ -1433,7 +1433,7 @@ def stringify_binned_data_pairs(pairs):
         lo_str = humanize.naturaldelta(timedelta(seconds=lo))
         hi_str = humanize.naturaldelta(timedelta(seconds=hi))
         if lo_str != hi_str:
-            yield ("{}--{}".format(lo_str, hi_str), count)
+            yield ("{}–\n{}".format(lo_str, hi_str), count)
         else:
             yield("{}".format(lo_str), count)
 
@@ -1441,7 +1441,7 @@ def stringify_binned_data_pairs(pairs):
 def make_graph(es, args):
     histogram = Counter()
     x_label = ""
-    y_label = ""
+    y_label = "Count"
 
     if args.graph_type == "bad_disks_cluster" \
        or args.graph_type == "bad_disks_month":
@@ -1467,7 +1467,7 @@ def make_graph(es, args):
         bad_blocks = clean_duplicate_blocks(get_bad_blocks(es))
 
         if args.graph_type == "bad_blocks_month":
-            x_label = "Month"
+            x_label = "Month (2017)"
             group_on = lambda block_data: "{:%b}".format(block_data[0])
         else:
             x_label = "Cluster"
@@ -1481,20 +1481,20 @@ def make_graph(es, args):
         log.info("Loaded %d reconstruction time measurements",
                  len(durations_s))
 
-        histogram = bin_values(durations_s, bins=5)
+        histogram = bin_values(durations_s, bins=15)
 
     elif args.graph_type == "disk_copy_time":
         durations_s = list(get_disk_copy_times(es))
         log.info("Loaded %d disk copy time measurements",
                  len(durations_s))
-        histogram = bin_values(durations_s, bins=8)
+        histogram = bin_values(durations_s, bins='auto')
 
     elif args.graph_type == "scrubbing_time":
         durations_s = [ts[3].total_seconds()
                        for ts in get_scrubbing_durations(es)]
         log.info("Loaded %d scrubbing time duration measurements",
                  len(durations_s))
-        histogram = bin_values(durations_s)
+        histogram = bin_values(durations_s, bins='auto')
     else:
         assert False, "Unknown graph report %s!" % args.graph_type
 
@@ -1514,11 +1514,25 @@ def make_graph(es, args):
         # Alphabetically or by bucket size, if it's a number
         data_pairs = stringify_binned_data_pairs(sorted(histogram.items()))
 
-    with args.writefile as f:
-        f.write(render_tex_histogram(data_pairs,
-                                     x_label,
-                                     y_label,
-                                     "20pt"))
+    if "_time" in args.graph_type:
+        x_label = "Duration"
+        rotate = 45
+    else:
+        rotate = 0
+
+    if len(histogram) <= 15:
+        show_every = 1
+    else:
+        show_every = int(len(histogram)/12)
+
+    log.info("Showing every %d label", show_every)
+
+    common.render_pyplot_bar_chart(data_pairs,
+                                   x_label,
+                                   y_label,
+                                   str(args.writefile),
+                                   label_rotation=rotate,
+                                   show_every_nth_label=show_every)
 
 
 if __name__ == '__main__':
@@ -1562,8 +1576,8 @@ if __name__ == '__main__':
                                 "Produce graphs and histograms",
                                 [
                                     (['-w', '--writefile'],
-                                     {'type': argparse.FileType('w'),
-                                      'default': '-'}),
+                                     {'type': str,
+                                      'default': 'histogram.pdf'}),
                                     (['graph_type'],
                                      {'type': str,
                                       'choices':
