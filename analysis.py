@@ -20,6 +20,7 @@ import dateparser
 import daiquiri
 import numpy as np
 import humanize
+import shelve
 
 log = daiquiri.getLogger()
 
@@ -27,6 +28,9 @@ seen_ids = defaultdict(list)
 
 #ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
 #ELASTIC_ADDRESS = "localhost:9200"
+
+CACHE_LOCATION = ".cache.db"
+
 ES_SYSLOG_INDEX = "syslog-*"
 ES_LOWLEVEL_BASE = 'netapp-lowlevel'
 ES_LOWLEVEL_INDEX = '{}-*'.format(ES_LOWLEVEL_BASE)
@@ -792,18 +796,6 @@ def troubles(es, cluster_name, disk_name, before="now", after=None):
         yield deserialise_log_entry(r)
 
 
-def prefail_false_positives(es):
-    pass
-
-
-def prefail_false_negatives(es):
-    pass
-
-
-def print_prefail_performance_report(es):
-    pass
-
-
 def non_troubles(es, cluster_name, disk_name, before="now"):
     """
     Ordered newest to oldest!
@@ -1150,8 +1142,17 @@ def normalise_smart_values(disk_data):
         return [-1] * SMART_LENGTH
 
 
-def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
-    # FIXME: do this async!
+def window_disk_data(es, cache_db, cluster, disk, start=None, end=UTC_NOW):
+    cache_key = "%s_%s_%s_%s" % (cluster, disk, start, end)
+    cached_result = cache_db.get(cache_key, None)
+    if cached_result:
+        log.debug("Cache hit for window %s",
+                  cache_key)
+        return cached_result
+
+    log.debug("Cache miss for window %s",
+              cache_key)
+
     bad_blocks = get_disk_bad_blocks(es, cluster, disk, start, end)
     try:
         bad_block_stdev = statistics.stdev(bad_blocks)
@@ -1186,12 +1187,10 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     io_completion_times = disk_data['io_completion_times']
     sense_fields = [disk_data['sense_data%s' % x] for x in SENSE_FIELDS_KEEP]
 
-
-
     # Sanity-checks:
     assert len(io_completions) == 5, \
         "io_completions had length {}, should be 5".format(len(io_completions))
-    #assert len(io_completion_times) == 16 # Apparently broken. Investigate.
+    assert len(io_completion_times) == 16 # Apparently broken. Investigate.
     assert len(smart_mystery) == SMART_MYSTERY_KEEP_LENGTH, \
         "smart mystery had length {}, vals {}, should be {}".format(
             len(smart_mystery),
@@ -1205,23 +1204,25 @@ def window_disk_data(es, cluster, disk, start=None, end=UTC_NOW):
     assert isinstance(read_errors, int), \
         "read_errors should be int, was {}".format(type(read_errors))
 
-    #   - min, max, delta for:
-    #     - retry_count (lldata)
-    #     - timeout_count (lldata)
-    return [len(bad_blocks),
-            bad_block_stdev,
-            trouble_count,
-            read_errors,
-            *smart_values,
-            *smart_mystery,
-            *io_completions,
-            #*io_completion_times,
-            *sense_fields,
-            disk_data['avg_io'],
-            disk_data['max_io'],
-            disk_data['retry_count'],
-            disk_data['timeout_count'],
-    ]
+
+    results = [len(bad_blocks),
+               bad_block_stdev,
+               trouble_count,
+               read_errors,
+               *smart_values,
+               *smart_mystery,
+               *io_completions,
+               *io_completion_times,
+               *sense_fields,
+               disk_data['avg_io'],
+               disk_data['max_io'],
+               disk_data['retry_count'],
+               disk_data['timeout_count']]
+
+    cache_db[cache_key] = results
+    cache_db.sync()
+
+    return results
 
 
 def normalise_type(disk_type_str):
@@ -1251,7 +1252,7 @@ def make_report(es, args):
         print_prediction_stats(es)
 
 
-def make_bad_block_data_slice(es, disk, window_end):
+def make_bad_block_data_slice(es, cache_db, disk, window_end):
     window_start_dates = [window_end - dur for dur in
                           [timedelta(hours=12),
                            timedelta(hours=48), ONE_WEEK]]
@@ -1261,11 +1262,12 @@ def make_bad_block_data_slice(es, disk, window_end):
     log.debug("Window start dates are: %s",
               ", ".join([str(x) for x in window_start_dates]))
 
-    twelve_h, fourtyeight_h, week = [window_disk_data(es, cluster, disk_label,
+    twelve_h, fourtyeight_h, week = [window_disk_data(es, cache_db,
+                                                      cluster, disk_label,
                                                       start=t, end=window_end)
                                      for t in window_start_dates]
 
-    all_time = window_disk_data(es, cluster, disk_label, end=window_end)
+    all_time = window_disk_data(es, cache_db, cluster, disk_label, end=window_end)
 
 
     return [*twelve_h, *fourtyeight_h, *week, *all_time]
@@ -1293,7 +1295,7 @@ def calculate_deltas(previous_data, new_data):
     return deltas
 
 
-def make_data_window(es, start, end, disk, previous_window,
+def make_data_window(es, cache_db, start, end, disk, previous_window,
                      fault_timestamps):
     assert isinstance(start, datetime)
     assert isinstance(end, datetime)
@@ -1313,13 +1315,14 @@ def make_data_window(es, start, end, disk, previous_window,
     # Skip is_broken and disk_type in comparison
     previous_data = None if not previous_window else previous_window[2:]
 
-    new_data = window_disk_data(es, cluster, disk_label, start=start, end=end)
+    new_data = window_disk_data(es, cache_db, cluster, disk_label,
+                                start=start, end=end)
     deltas = calculate_deltas(previous_data, new_data)
     log.debug("Deltas were: %s", ", ".join([str(i) for i in deltas]))
     return [broken_column, disk['type'], *new_data, *deltas]
 
 
-def prepare_training_data(es, bad_blocks=False):
+def prepare_training_data(es, cache_db, bad_blocks=False):
     disks = get_disks(es)
 
     EST_NO_DISKS = 4560
@@ -1360,20 +1363,23 @@ def prepare_training_data(es, bad_blocks=False):
                       cluster, disk_label, start, end)
 
             try:
-                this_window = make_data_window(es=es, start=start, end=end,
+                this_window = make_data_window(es=es, cache_db=cache_db,
+                                               start=start, end=end,
                                                disk=disk,
                                                previous_window=previous_window,
                                                fault_timestamps=faults)
                 yield this_window
-            except Exception as e:
-                log.exception("Error rendering time window [%s, %s] for disk %s %s. Skipping it!", start, end, cluster, disk_label)
+            except Exception:
+                log.exception("Error rendering time window [%s, %s] for disk %s %s. Skipping it!",
+                              start, end, cluster, disk_label)
                 continue
             previous_window = this_window
 
 
-
-
 def make_training_data(es, args):
+    # Writeback = False: we just want to cache results, not modify them.
+
+
     values_in_window = ["bad_block_count",
                         "bad_block_stdev",
                         "trouble_log_count",
@@ -1399,18 +1405,25 @@ def make_training_data(es, args):
     log.info("Using field names %s", ", ".join(fieldnames))
 
 
-    if args.op_type == "disks":
-        dataset = prepare_training_data(es, bad_blocks=False)
-    elif args.op_type == "bad_blocks":
-        dataset = prepare_training_data(es, bad_blocks=True)
+    with shelve.open(CACHE_LOCATION,
+                     writeback=False) as cache_db:
+        if args.op_type == "disks":
+            dataset = prepare_training_data(es,
+                                            cache_db,
+                                            bad_blocks=False)
+        elif args.op_type == "bad_blocks":
+            dataset = prepare_training_data(es,
+                                            cache_db,
+                                            bad_blocks=True)
 
-    with args.writefile as csvfile:
-        writer = csv.writer(csvfile,
+        with args.writefile as csvfile:
+            writer = csv.writer(csvfile,
                                 delimiter=';',
-                                quotechar='|', quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(fieldnames)
-        for row in dataset:
-            writer.writerow(row)
+                                quotechar='|',
+                                quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(fieldnames)
+            for row in dataset:
+                writer.writerow(row)
 
 
 def make_disk_report(es, args):
