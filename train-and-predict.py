@@ -14,6 +14,7 @@ import numpy as np
 from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
 import daiquiri
+import palettable
 log = daiquiri.getLogger()
 
 
@@ -145,8 +146,8 @@ def try_predict(ok, broken, args):
     ok_p = args.percent_ok
     if not args.do_random_forest:
         log.debug("Using normal classification tree")
-        if not args.nrounds:
-            tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
+        if not args.nrounds >= 2:
+            tpr, far, tree = predict(broken, ok, keep_broken=broken_p/100,
                                       keep_nonbroken=ok_p/100)
         else:
             results = predict(broken, ok, keep_broken=broken_p/100,
@@ -154,12 +155,18 @@ def try_predict(ok, broken, args):
 
     else:
         log.debug("Using random forest")
-        tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
+        tpr, far, tree = predict(broken, ok, keep_broken=broken_p/100,
                                   keep_nonbroken=ok_p/100,
                                   classifier=RandomForestClassifier)
-    if args.nrounds and not args.do_random_forest:
+    if args.nrounds >= 2 and not args.do_random_forest:
         tprs = [x[0] for x in results]
         fars = [x[1] for x in results]
+
+        # Use the best result (sorted first by TPR high to low, then FAR
+        # low to high
+        results.sort(key=lambda tup: tup[1], reverse=False)
+        results.sort(reverse=True, key=lambda tup: tup[0])
+        _, _, tree = results[0]
 
         def int_mode(xs):
             return mode([int(x * 100)/100 for x in tprs])
@@ -171,6 +178,12 @@ def try_predict(ok, broken, args):
     else:
         print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
               .format(tpr, far, broken_p, ok_p))
+
+    if args.dump_model_file:
+        log.info("Dumping model to %s", args.dump_model_file)
+
+        from sklearn.externals import joblib
+        joblib.dump(tree, args.dump_model_file)
 
 
 def make_tree(ok, broken, args):
@@ -248,7 +261,7 @@ def make_kmeans_graph(ok, broken, args):
     plt.clf()
     plt.imshow(Z, interpolation='nearest',
                extent=(xx.min(), xx.max(), yy.min(), yy.max()),
-               cmap=plt.cm.Paired,
+               cmap=palettable.wesanderson.Moonrise1_5.mpl_colormap,
                aspect='auto', origin='lower')
     plt.plot(reduced_data[:, 0], reduced_data[:, 1], 'k.', markersize=2)
     # Plot the centroids as a white X
@@ -320,6 +333,11 @@ if __name__ == '__main__':
                                      {'type': int,
                                       'help': "Run n iterations in stead of one",
                                       'dest': 'nrounds',
+                                      'default': 1}),
+                                    (['-m', '--dump-model-file'],
+                                     {'type': str,
+                                      'help': "Dump the model to this file afterwards",
+                                      'dest': 'dump_model_file',
                                       'default': None}),
                                 ],
                                 try_predict),

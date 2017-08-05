@@ -21,6 +21,7 @@ import daiquiri
 import numpy as np
 import humanize
 import shelve
+import tzlocal
 
 log = daiquiri.getLogger()
 
@@ -1563,6 +1564,21 @@ def make_graph(es, args):
                                    label_rotation=rotate,
                                    show_every_nth_label=show_every)
 
+def predict_failures(es, args):
+    from sklearn.externals import joblib
+
+    now = dateparser.parse(args.at,
+                           settings={'TO_TIMEZONE': 'UTC',
+                                     'TIMEZONE': str(tzlocal.get_localzone())})
+
+    log.info("Predicting disk failures at UTC %s", now)
+
+    clf = joblib.load(args.disk_predictor_file)
+
+    # For each disk, generate the two last 24-h windows since args.at,
+    # feed the last window into predictor, see what happens
+    # Failures will happen in [BUFFER_TIME + 2 windows, BUFFER_TIME]
+
 
 if __name__ == '__main__':
     parser = common.make_es_base_parser()
@@ -1618,9 +1634,24 @@ if __name__ == '__main__':
                                        "disk_copy_time",
                                        "scrubbing_time"]}),
                                 ],
-                                make_graph)
+                                make_graph),
+                               ('predict_failures',
+                                "Predict failures using a model",
+                                [
+                                    (['-m', '--disk-failure-predictor'],
+                                     {'type': str,
+                                      'default': 'disk_failure_model.pkl',
+                                      'dest': 'disk_predictor_file',
+                                      'help':
+                                      'file containing a serialised predictor for disk failures'
+                                    }),
 
-
+                                    (['-a', '--at'],
+                                     {'type': str,
+                                      'help': 'Date and time for prediction (default: now)',
+                                      'default': 'now'}),
+                                ],
+                                predict_failures),
                            ])
 
     args = parser.parse_args()

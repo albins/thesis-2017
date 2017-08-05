@@ -169,8 +169,21 @@ def read_csv_w_labels(filename):
                            delimiter=";",
                            quotechar="|",
                            header="infer")
+
+    data = filter_unchanged_disk_data(data,
+                                      keep_columns=["is_broken",
+                                                    "disk_type"])
+
     return data
 
+def filter_unchanged_disk_data(data, keep_columns):
+    for x in data:
+        if "delta" in x or x in keep_columns:
+            continue
+        if set(data["%s_delta" % x]) == set([0]):
+            log.warning("Dropping column %s due to no deltas", x)
+            del data[x]
+    return data
 
 def disk_training_set():
     data = read_csv_w_labels("../Data/training_data.csv")
@@ -226,6 +239,16 @@ def read_zhu_2013_data(delete_serials=True):
                            delimiter=",",
                            header=None,
                            names=ZHU_FEATURE_LABELS)
+
+    # Remember, -1 = broken, 1 is ok, so broken disks comes first
+    data.sort_values(['Disk ID', 'Is broken'],
+                     ascending=[True, True],
+                     inplace=True)
+
+    # Make sure we only have one of every disk (by ID), preferring
+    # broken disks
+    data.drop_duplicates(subset='Disk ID', keep='first', inplace=True)
+
     if delete_serials:
         del data['Disk ID']
 
@@ -361,7 +384,8 @@ def tree_as_pdf(t, target_file, feature_names, class_names):
                                     class_names=class_names,
                                     rounded=True,
                                     filled=True,
-                                    special_characters=True)
+                                    special_characters=True,
+                                    proportion=True)
     graph = pydotplus.graph_from_dot_data(dot_data)
     graph.write_pdf(target_file)
 
