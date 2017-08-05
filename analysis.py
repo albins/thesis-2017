@@ -1150,7 +1150,7 @@ def window_disk_data(es, cache_db, cluster, disk, start=None, end=UTC_NOW):
                   cache_key)
         return cached_result
 
-    log.debug("Cache miss for window %s",
+    log.info("Cache miss for window %s",
               cache_key)
 
     bad_blocks = get_disk_bad_blocks(es, cluster, disk, start, end)
@@ -1393,6 +1393,10 @@ def make_training_data(es, args):
                         "blocks_written",
                         "verifies",
                         "max_q",
+                        *["io_completed_count_%d_ms" % t for t in
+                          [4, 8, 16, 30, 50, 100, 200, 400, 800,
+                           2000, 4000, 16000, 30000, 45000,
+                           60000, 100000]],
                         *["sense_%d" % i for i in SENSE_FIELDS_KEEP],
                         "avg_io",
                         "max_io",
