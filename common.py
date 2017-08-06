@@ -178,7 +178,7 @@ def read_csv_w_labels(filename):
 
 def filter_unchanged_disk_data(data, keep_columns):
     for x in data:
-        if "delta" in x or x in keep_columns or not "%s_delta" in data:
+        if "delta" in x or x in keep_columns or not "%s_delta" % x in data:
             continue
         if set(data["%s_delta" % x]) == set([0]):
             log.warning("Dropping column %s due to no deltas", x)
@@ -379,6 +379,8 @@ def render_pyplot_scatter_plot(xs, ys, data_labels, file_name,
 
 def tree_as_pdf(t, target_file, feature_names, class_names):
     import pydotplus
+    from sklearn import tree
+
     dot_data = tree.export_graphviz(t, out_file=None,
                                     feature_names=feature_names,
                                     class_names=class_names,

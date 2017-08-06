@@ -24,6 +24,8 @@ log = daiquiri.getLogger()
 elastic_logger = logging.getLogger('elasticsearch')
 elastic_logger.setLevel(logging.WARNING)
 
+already_warned_completion_times = set()
+
 disk_re = regex.compile("^Disk\s+.*?\.(?P<disk>\d+.\d+):?")
 row_re = regex.compile(r".*:\s+(0x([0-9a-f]{2})+\s*)+")
 node_re = regex.compile(r"^Node: db(?P<node_name>.+\d+)\s*")
@@ -248,14 +250,18 @@ def read_io_ompletion_times_per_index(lines, offset_hint=0):
             raise ValueError("Wrong number of columns for I/O completions: {}"
                              .format(len(columns)))
 
+        log.debug("Found disk id %d", id)
         values = tuple([int(x) for x in columns[1:]])
         indices[id] = values
         return indices
 
     heading_re = regex.compile("^I/O Completion Time Table.*")
-    return read_table(lines, start_re=heading_re, re_offset=5,
-                      reducer=acc_indices,
-                      offset_hint=offset_hint)
+    histograms = {}
+    offset, _ = read_table(lines, start_re=heading_re, re_offset=5,
+                           reducer=acc_indices,
+                           offset_hint=offset_hint,
+                           accumulator=histograms)
+    return offset, histograms
 
 
 def read_disk_overview(lines):
@@ -354,6 +360,7 @@ def read_smart_data(lines, offset_hint=0):
 
 
 def extract_node_data(lines):
+    global already_warned_completion_times
     node_data = dict()
     offset, node_data["disk_overview"] = read_disk_overview(lines)
     node_data['headings'] = identify_headings(lines)
@@ -392,8 +399,23 @@ def extract_node_data(lines):
         lines,
         offset_hint=offset)
 
+    assert node_data['io_completions'], "I/O Completions were parsed"
+
     _, node_data['io_completion_times'] = read_io_ompletion_times_per_index(
         lines, offset_hint=offset)
+
+    assert node_data['io_completion_times'], \
+        "I/O Completion times were not parsed"
+
+    for disk_label, disk_data in node_data['io_completions'].items():
+        disk_id = disk_data[0]
+
+        if disk_id not in node_data['io_completion_times']:
+            if disk_label not in already_warned_completion_times:
+                log.warning("Disk %s (%s) had no completion times. First key: %s",
+                            disk_label, disk_id,
+                            sorted(node_data['io_completion_times'].keys())[0])
+                already_warned_completion_times.add(disk_label)
 
     return node_data
 
@@ -904,7 +926,8 @@ def prepare_es_data(cluster, parsed_data, type_fw_index):
             smart_data = node_data['smart_data'].get(disk_location, None)
             smart_mystery = node_data['smart_mystery'].get(disk_location, None)
             completions = node_data['io_completions'].get(disk_location)
-            assert completions
+
+            assert completions, "Did not manage to parse completions"
             fw_version, disk_type = get_closest_disk_data(type_fw_index,
                                                           cluster,
                                                           disk_location,
@@ -1176,10 +1199,13 @@ def runtime_statistics(runtimes):
     }
 
 
-def profile_parser(data_directory):
-    NUM_FILES = 20
-    cluster_ts_filenames = list(file_index_to_triplets(
-        index_files(data_directory)))[:NUM_FILES]
+def profile_parser(data_directory, num_files):
+    if num_files > 0:
+        cluster_ts_filenames = list(file_index_to_triplets(
+            index_files(data_directory)))[:num_files]
+    else:
+        cluster_ts_filenames = list(file_index_to_triplets(
+            index_files(data_directory)))
 
     runtimes = []
     logging.getLogger('parse_emails').setLevel(logging.WARNING)
@@ -1224,7 +1250,7 @@ def print_smart_report(es, args):
 
 
 def profile_parser_report(es, args):
-    profile_parser(args.data_directory)
+    profile_parser(args.data_directory, args.numfiles)
 
 
 if __name__ == '__main__':
@@ -1253,7 +1279,15 @@ if __name__ == '__main__':
                                 print_smart_report),
                                ('profile_parse',
                                 "Print profiling data for the file parser",
-                                [],
+                                [
+                                    (['data_directory'],
+                                     {'type': str}),
+                                    (['--numfiles', '-n'],
+                                     {'type': int,
+                                      'default': 20,
+                                      'help': "use N files",
+                                      'dest': 'numfiles'}),
+                                ],
                                 profile_parser_report),
                            ])
 

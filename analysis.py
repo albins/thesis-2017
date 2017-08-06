@@ -1186,12 +1186,18 @@ def window_disk_data(es, cache_db, cluster, disk, start=None, end=UTC_NOW):
         smart_mystery.append(smart_mystery_data[mystery_id])
     io_completions = disk_data['io_completions']
     io_completion_times = disk_data['io_completion_times']
+
+    # These values are actually missing for some disks
+    if not io_completion_times:
+        io_completion_times = [-1] * 16
+
+
     sense_fields = [disk_data['sense_data%s' % x] for x in SENSE_FIELDS_KEEP]
 
     # Sanity-checks:
     assert len(io_completions) == 5, \
         "io_completions had length {}, should be 5".format(len(io_completions))
-    assert len(io_completion_times) == 16 # Apparently broken. Investigate.
+    assert len(io_completion_times) == 16
     assert len(smart_mystery) == SMART_MYSTERY_KEEP_LENGTH, \
         "smart mystery had length {}, vals {}, should be {}".format(
             len(smart_mystery),
