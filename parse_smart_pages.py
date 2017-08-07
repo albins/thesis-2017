@@ -3,7 +3,6 @@ import common
 from common import format_counter, timed
 
 import sys
-import regex
 from collections import defaultdict, Counter
 import gzip as gz
 import logging
@@ -15,10 +14,11 @@ import time
 from datetime import timedelta
 
 import dateparser
-from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan, parallel_bulk, streaming_bulk
+from elasticsearch_dsl import Q, Search
 import pytz
 import daiquiri
+import regex
 
 log = daiquiri.getLogger()
 elastic_logger = logging.getLogger('elasticsearch')
@@ -48,11 +48,8 @@ DATA_FILE_FIELDS = ["timestamp", "cluster", "disk", "serial",
                     "smart_data",
                     "smart_mystery"]
 CSV_DELIMITER = ";"
-
-# db-51167.cern.ch:9200
-ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
-ES_INDEX_BASE = 'netapp-lowlevel'
-ES_INDEX = 'netapp-lowlevel-*'
+ES_INDEX_BASE = 'itdb_netapp-lowlevel'
+ES_INDEX = 'itdb_netapp-lowlevel-*'
 LOW_LEVEL_DATA_Q = '*'
 
 
@@ -65,8 +62,9 @@ def es_count_disks_by_cluster(es, index, q):
         "size": 0,
         "aggs": {
             "group_by_cluster": {
-                "terms": {"size": 0,
-                          "field": "cluster_name"
+                "terms": {
+                    #"size": 0,
+                    "field": "cluster_name"
                 },
                 "aggs": {
                     "count_distinct_disks": {
@@ -1003,20 +1001,12 @@ def es_get_disks(es, index):
     Return a dictionary of cluster => [disks] as stored in the current
     system. Disks are integer tuples of shelf number, bay number.
     """
-    q = {"size": 1,
-         "aggs": {
-             "group_by_cluster": {
-                 "terms": {
-                     "size": 0,
-                     "field": "cluster_name"
-                 },
-                 "aggs": {
-                     "disks": {
-                         "terms": {
-                             "size": 0,
-                             "field": "disk_location"
-                         }}}}}}
 
+    s = Search()
+    s.aggs.bucket('group_by_cluster', 'terms', field='cluster_name.keyword')\
+          .bucket('disks', 'terms', field='disk_location.keyword')
+    s = s[0]
+    q = s.to_dict()
     cluster_disks = {}
     res = es.search(index=index, body=q)
     buckets = get_buckets(res, 'group_by_cluster')
@@ -1046,12 +1036,13 @@ def es_get_high_water_mark(es, index):
     cluster_name => last seen timestamp
     """
     per_cluster = defaultdict(lambda: BEGINNING_OF_TIME)
+
     q = {"size": 0,
          "aggs": {
              "group_by_cluster": {
                  "terms": {
-                     "size": 0,
-                     "field": "cluster_name",
+                     #"size": 0,
+                     "field": "cluster_name.keyword",
                      "order": {
                          "max_time": "desc"
                      }

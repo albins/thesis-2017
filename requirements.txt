@@ -1,7 +1,10 @@
 dateparser==0.6.0
-# Elasticsearch 2.x
-elasticsearch>=2.0.0,<3.0.0
-elasticsearch-dsl>=2.2.0,<3.0.0
+# Elasticsearch 5.x
+elasticsearch>=5.0.0,<6.0.0
+elasticsearch-dsl>=5.0.0,<6.0.0
 lxml==3.7.3
 regex
 pandas
+matplotlib==2.0.2
+palettable==3.0.0
+daiquiri==1.2.1

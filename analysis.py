@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from parse_emails import format_counter, render_tex_histogram
 from parse_smart_pages import count_disks
+from parse_smart_pages import ES_INDEX_BASE as ES_LOWLEVEL_BASE
 import common
 
 from collections import Counter, defaultdict
@@ -33,8 +34,7 @@ seen_ids = defaultdict(list)
 
 CACHE_LOCATION = ".cache"
 
-ES_SYSLOG_INDEX = "syslog-*"
-ES_LOWLEVEL_BASE = 'netapp-lowlevel'
+ES_SYSLOG_INDEX = "itdb_netapp-syslog-*"
 ES_LOWLEVEL_INDEX = '{}-*'.format(ES_LOWLEVEL_BASE)
 READERR_REPAIR_Q = "event_type: raid.rg.readerr.repair.*",
 FAIL_REASONS = ["raid.config.filesystem.disk.failed",
