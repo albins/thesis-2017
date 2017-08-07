@@ -474,7 +474,7 @@ def read_cluster_data_snapshot(filename):
         try:
             cluster_data[k] = extract_node_data(value)
         except ValueError:
-            log.traceback("Error extracting data for node %s in file %s",
+            log.exception("Error extracting data for node %s in file %s",
                           k, filename)
 
     return cluster_data
