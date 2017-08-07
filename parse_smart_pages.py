@@ -366,10 +366,13 @@ def read_smart_data(lines, offset_hint=0):
 
 def extract_node_data(lines):
     log.debug("Parsing %d lines of node data", len(lines))
-    log.debug("Lines: %s", lines)
     global already_warned_completion_times
     node_data = dict()
-    offset, node_data["disk_overview"] = read_disk_overview(lines)
+    try:
+        offset, node_data["disk_overview"] = read_disk_overview(lines)
+    except IndexError:
+        raise ValueError("Invalid node data file!")
+
     node_data['headings'] = identify_headings(lines)
 
     if node_data['headings']['Disk SMART Pages']:
@@ -468,7 +471,11 @@ def read_cluster_data_snapshot(filename):
     for k, value in cluster_data.items():
         log.debug("Processing data for node %s in file %s",
                   k, filename)
-        cluster_data[k] = extract_node_data(value)
+        try:
+            cluster_data[k] = extract_node_data(value)
+        except ValueError:
+            log.traceback("Error extracting data for node %s in file %s",
+                          k, filename)
 
     return cluster_data
 
