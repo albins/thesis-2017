@@ -476,6 +476,8 @@ def read_cluster_data_snapshot(filename):
         except ValueError:
             log.exception("Error extracting data for node %s in file %s",
                           k, filename)
+            if k in cluster_data:
+                del cluster_data[k]
 
     return cluster_data
 
