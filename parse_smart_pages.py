@@ -476,8 +476,7 @@ def read_cluster_data_snapshot(filename):
         except ValueError:
             log.exception("Error extracting data for node %s in file %s",
                           k, filename)
-            if k in cluster_data:
-                del cluster_data[k]
+            cluster_data[k] = None
 
     return cluster_data
 
@@ -938,6 +937,9 @@ def prepare_es_data(cluster, parsed_data, type_fw_index):
 
     # Ignore node names
     for node_data in cluster_data.values():
+        if not node_data:
+            continue
+
         for disk_data in node_data['disk_overview']:
             disk_location = disk_to_location(disk_data[0])
             smart_data = node_data['smart_data'].get(disk_location, None)
