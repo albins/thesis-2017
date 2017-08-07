@@ -222,6 +222,7 @@ def read_io_completions_per_disk(lines, offset_hint=0):
     """
     Return offset, {disk => (index, <data>)}
     """
+    log.debug("Reading I/O completion times master table at %d", offset_hint)
 
     def acc_disks(disks, columns):
         id, columns = extract_id_column(columns)
@@ -243,6 +244,7 @@ def read_io_ompletion_times_per_index(lines, offset_hint=0):
     """
     Return offset, index => (histogram)
     """
+    log.debug("Reading I/O completion times per bucket at %d", offset_hint)
     def acc_indices(indices, columns):
         # Fixme: make sure columns have the correct length
         id, columns = extract_id_column(columns)
@@ -270,6 +272,7 @@ def read_disk_overview(lines):
                             Serial                 Disk   Average   Max    Retry  Timeout  Sense Data
     Disk                    Number                 State   I/O      I/O    count  count    1       2      3     4     5     9   B
     """
+    log.debug("Reading disk overview")
     def acc_disks(disks, columns):
         if not len(columns) == 14:
             raise ValueError("Invalid disk overview line!")
@@ -283,6 +286,7 @@ def read_disk_overview(lines):
 
 
 def identify_headings(lines):
+    log.debug("Identifying headings")
     headings = defaultdict(list)
 
     for i, line in enumerate(lines):
@@ -297,6 +301,7 @@ def identify_headings(lines):
 
 
 def read_sense_error(lines, offset_hint=0):
+    log.debug("Reading SENSE error data")
     start_offset = offset_hint
     data = list()
 
