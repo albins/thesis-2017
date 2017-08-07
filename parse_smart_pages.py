@@ -365,6 +365,8 @@ def read_smart_data(lines, offset_hint=0):
 
 
 def extract_node_data(lines):
+    log.debug("Parsing %d lines of node data", len(lines))
+    log.debug("Lines: %s", lines)
     global already_warned_completion_times
     node_data = dict()
     offset, node_data["disk_overview"] = read_disk_overview(lines)
