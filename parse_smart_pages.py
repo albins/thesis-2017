@@ -459,7 +459,8 @@ def read_cluster_data_snapshot(filename):
             raise ValueError("Did not find a single node declaration!")
 
     for k, value in cluster_data.items():
-        log.debug("Processing data for node {}".format(k))
+        log.debug("Processing data for node %s in file %s",
+                  k, filename)
         cluster_data[k] = extract_node_data(value)
 
     return cluster_data
@@ -1061,7 +1062,7 @@ def es_import(es, documents):
     """
     Take a generator of documents and index them.
     """
-    for result in parallel_bulk(es, documents, raise_on_error=True):
+    for result in streaming_bulk(es, documents, raise_on_error=True):
         succeeded, description = result
         if not succeeded:
             log.error(description)
