@@ -4,7 +4,7 @@ import math
 import itertools
 import logging
 import sys
-from statistics import median, mode, stdev
+from statistics import median, stdev
 import argparse
 
 import common
@@ -13,6 +13,7 @@ from common import sample_matrix, tree_as_pdf, verify_training
 import numpy as np
 from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
+from scipy.stats import mode
 import daiquiri
 import palettable
 log = daiquiri.getLogger()
@@ -38,11 +39,25 @@ def predict_worst(*args, **kwargs):
 
 
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
-            classifier=tree.DecisionTreeClassifier, nrounds=None):
-    training_broken, witheld_broken = sample_matrix(broken,
-                                                    keep_portion=keep_broken)
-    training_ok, witheld_ok = sample_matrix(ok_disks,
-                                            keep_portion=keep_nonbroken)
+            classifier=tree.DecisionTreeClassifier, nrounds=None,
+            max_depth=None):
+
+    if keep_broken == 0 and keep_nonbroken == 0:
+        log.info("Using equal proportions broken/non-broken")
+        # Use equal proportions
+        half_broken_length = int(broken.shape[0]/2)
+
+        training_broken = broken[:half_broken_length]
+        witheld_broken = broken[half_broken_length:]
+
+        training_ok = ok_disks[:half_broken_length]
+        witheld_ok = ok_disks[half_broken_length:]
+    else:
+        training_broken, witheld_broken = sample_matrix(
+            broken,
+            keep_portion=keep_broken)
+        training_ok, witheld_ok = sample_matrix(ok_disks,
+                                                keep_portion=keep_nonbroken)
 
     training_set = np.append(training_ok, training_broken, axis=0)
     verification_set = np.append(witheld_broken, witheld_ok, axis=0)
@@ -60,21 +75,21 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
 
     if not nrounds:
         with common.timed(task_name="training"):
-            c = classifier(random_state=42)
+            c = classifier(random_state=42, max_depth=max_depth)
             model = c.fit(training_set, labels)
 
             return verify_training(model, verification_set, expected_labels)
     else:
         results = []
         for i in range(0, nrounds):
-            c = classifier(random_state=i)
+            c = classifier(random_state=i, max_depth=max_depth)
             model = c.fit(training_set, labels)
             results.append(verify_training(model, verification_set,
                                            expected_labels))
         return results
 
 
-def find_best_training_proportion(broken, ok, nrounds, broken_start, ok_start):
+def find_best_training_proportion(broken, ok, nrounds, broken_start, ok_start, max_depth):
     MIN_DATAPOINTS_BROKEN = 3
 
     num_broken_drives, _ = broken.shape
@@ -94,7 +109,7 @@ def find_best_training_proportion(broken, ok, nrounds, broken_start, ok_start):
     best_tpr_far = float("inf")
     best_far = float("inf")
     best_tpr_combination = (best_tpr, best_far)
-    None_far_combination = None
+    best_far_combination = None
     keep_ok_p = range(max(min_ok_percent, ok_start), 76, 10)
     keep_broken_p = range(max(broken_start, min_broken_percent),
                           max_broken_percent + 1, 10)
@@ -105,7 +120,8 @@ def find_best_training_proportion(broken, ok, nrounds, broken_start, ok_start):
     for ok_p, broken_p in itertools.product(keep_ok_p, keep_broken_p):
         log.debug("Testing %d%% ok, %d%% broken data", ok_p, broken_p)
         tpr, far, _tree = predict_worst(broken, ok, keep_broken=broken_p/100,
-                                        keep_nonbroken=ok_p/100, nrounds=nrounds)
+                                        keep_nonbroken=ok_p/100, nrounds=nrounds,
+                                        max_depth=max_depth)
         if far <= 0.001 or tpr >= 0.999:
             # Ignoring perfect outcome
             continue
@@ -134,9 +150,11 @@ def find_best_training_proportion(broken, ok, nrounds, broken_start, ok_start):
 def best_settings(ok, broken, args):
     ok_p, broken_p = find_best_training_proportion(broken, ok, args.nrounds,
                                                    broken_start=args.broken_start,
-                                                   ok_start=args.ok_start)
+                                                   ok_start=args.ok_start,
+                                                   max_depth=args.max_depth)
     tpr, far, _tree = predict(broken, ok, keep_broken=broken_p/100,
-                              keep_nonbroken=ok_p/100)
+                              keep_nonbroken=ok_p/100,
+                              max_depth=args.max_depth)
     print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
           .format(tpr, far, broken_p, ok_p))
 
@@ -148,10 +166,12 @@ def try_predict(ok, broken, args):
         log.debug("Using normal classification tree")
         if not args.nrounds >= 2:
             tpr, far, tree = predict(broken, ok, keep_broken=broken_p/100,
-                                      keep_nonbroken=ok_p/100)
+                                     keep_nonbroken=ok_p/100,
+                                     max_depth=args.max_depth)
         else:
             results = predict(broken, ok, keep_broken=broken_p/100,
-                              keep_nonbroken=ok_p/100, nrounds=args.nrounds)
+                              keep_nonbroken=ok_p/100, nrounds=args.nrounds,
+                              max_depth=args.max_depth)
 
     else:
         log.debug("Using random forest")
@@ -169,7 +189,7 @@ def try_predict(ok, broken, args):
         _, _, tree = results[0]
 
         def int_mode(xs):
-            return mode([int(x * 100)/100 for x in tprs])
+            return mode([int(x * 100)/100 for x in tprs]).mode[0]
 
         print("Result: TPR: [{}, {}] (stdev={}, mode={}, median={}), FAR [{}, {}] (stedv={}, mode={}, median={}) at mix {}% from failed set, {}% from OK set"
                   .format(min(tprs), max(tprs), stdev(tprs), int_mode(tprs), median(tprs),
@@ -191,10 +211,13 @@ def make_tree(ok, broken, args):
     ok_p = args.percent_ok
     if args.nrounds:
         tpr, far, t = predict_best(broken, ok, keep_broken=broken_p/100,
-                                   keep_nonbroken=ok_p/100, nrounds=args.nrounds)
+                                   keep_nonbroken=ok_p/100,
+                                   nrounds=args.nrounds,
+                                   max_depth=args.max_depth)
     else:
         tpr, far, t = predict(broken, ok, keep_broken=broken_p/100,
-                              keep_nonbroken=ok_p/100)
+                              keep_nonbroken=ok_p/100,
+                              max_depth=args.max_depth)
 
     target_file = args.writefile
 
@@ -317,6 +340,11 @@ if __name__ == '__main__':
                                       'help': "Start trying at this percentage",
                                       'dest': 'ok_start',
                                       'default': 1}),
+                                    (['-d','--max-depth'],
+                                     {'type': int,
+                                      'help': "Force tree to be of this maximum depth",
+                                      'dest': 'max_depth',
+                                      'default': None}),
                                 ],
                                 best_settings),
                                ('predict',
@@ -339,6 +367,11 @@ if __name__ == '__main__':
                                       'help': "Dump the model to this file afterwards",
                                       'dest': 'dump_model_file',
                                       'default': None}),
+                                    (['-d','--max-depth'],
+                                     {'type': int,
+                                      'help': "Force tree to be of this maximum depth",
+                                      'dest': 'max_depth',
+                                      'default': None}),
                                 ],
                                 try_predict),
                                ('tree',
@@ -353,6 +386,11 @@ if __name__ == '__main__':
                                      {'type': int,
                                       'help': "Run n iterations in stead of one",
                                       'dest': 'nrounds',
+                                      'default': None}),
+                                    (['-m','--max-depth'],
+                                     {'type': int,
+                                      'help': "Force tree to be of this maximum depth",
+                                      'dest': 'max_depth',
                                       'default': None}),
                                 ],
                                 make_tree),

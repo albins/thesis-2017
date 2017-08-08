@@ -219,6 +219,10 @@ def split_disk_data(disk_data):
 
     nonbroken = disk_data[:last_nonbroken_row]
     broken = disk_data[last_nonbroken_row:]
+
+    log.info("Split sizes are: %d, %d respectively",
+             nonbroken.shape[0],
+             broken.shape[0])
     return nonbroken, broken
 
 
@@ -406,6 +410,11 @@ def make_roc_measurements(broken,
         xs_and_ys.append(calculate_roc_point(n, broken, ok,
                                              broken_percent=broken_percent,
                                              predict=predict))
+
+    xs_and_ys.append(calculate_roc_point(0, broken, ok,
+                                         broken_percent=0,
+                                         predict=predict))
+
 
     ys, xs, vals = zip(*xs_and_ys)
     return xs, ys, vals

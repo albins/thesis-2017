@@ -30,7 +30,7 @@ seen_ids = defaultdict(list)
 #ELASTIC_ADDRESS = "db-51167.cern.ch:9200"
 #ELASTIC_ADDRESS = "localhost:9200"
 
-CACHE_LOCATION = ".cache.db"
+CACHE_LOCATION = ".cache"
 
 ES_SYSLOG_INDEX = "syslog-*"
 ES_LOWLEVEL_BASE = 'netapp-lowlevel'
@@ -142,8 +142,28 @@ SMART_NAMES = {1: "read_error_rate",
                195: "hardware_ECC_recovered",
                197: "current_pending_sector_count",
 }
-SMART_MYSTERY_FIELDS_KEEP = [23, 24, 27, 28, 32, 43, 44, 45, 46, 47, 48,
-                             51, 52, 53, 54, 55, 56, 89, 90, 94]
+SMART_MYSTERY_FIELDS_KEEP = [
+    23,
+    # 24,
+    27,
+    # 28,
+    # 32,
+    43,
+    44,
+    45,
+    46,
+    47,
+    # 48,
+    51,
+    52,
+    53,
+    54,
+    55,
+    # 56,
+    89,
+    # 90,
+    # 94,
+]
 SENSE_FIELDS_KEEP = [1, 3]
 
 SMART_LENGTH = len(SMART_FIELDS)
@@ -1584,6 +1604,37 @@ def predict_failures(es, args):
     # For each disk, generate the two last 24-h windows since args.at,
     # feed the last window into predictor, see what happens
     # Failures will happen in [BUFFER_TIME + 2 windows, BUFFER_TIME]
+    window_dimensions = [(now - WINDOW_SIZE * 2, now - WINDOW_SIZE),
+                         (now - WINDOW_SIZE, now)]
+
+    with shelve.open(CACHE_LOCATION, writeback=False) as cache_db:
+        for disk in get_disks(es):
+            disk_label = disk['disk_location']
+            cluster = disk['cluster_name']
+            log.info("Getting predictions for %s %s",
+                     cluster, disk_label)
+
+            try:
+                window_1 = make_data_window(es=es,
+                                            disk=disk,
+                                            cache_db=cache_db,
+                                            start=window_dimensions[0][0],
+                                            end=window_dimensions[0][1],
+                                            previous_window=None,
+                                            fault_timestamps=[])
+
+                window_2 = make_data_window(es=es,
+                                            disk=disk,
+                                            cache_db=cache_db,
+                                            start=window_dimensions[0][0],
+                                            end=window_dimensions[0][1],
+                                            previous_window=window_1,
+                                            fault_timestamps=[])
+            except Exception:
+                log.exception("Error generating data window for predictions")
+
+            prediction = clf.predict(window_2)
+            log.info(prediction)
 
 
 if __name__ == '__main__':
