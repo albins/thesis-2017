@@ -222,3 +222,4 @@ TSWLatexianTemp*
 *.pyc
 .ipynb_checkpoints
 /.env
+get-smart-data/fabfile.py
