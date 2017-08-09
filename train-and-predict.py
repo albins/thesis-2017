@@ -13,6 +13,8 @@ from common import sample_matrix, tree_as_pdf, verify_training
 import numpy as np
 from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import f_classif, chi2
+from sklearn.feature_selection import SelectKBest
 from scipy.stats import mode
 import daiquiri
 import palettable
@@ -249,6 +251,41 @@ def make_roc_graph(ok, broken, args):
                                       y_label="True-positive rate")
 
 
+def reduce_features(dataset, labels, k):
+    """
+    Reduce to k features, returning the column indices to keep.
+
+    Use with m[:,return value]
+    """
+
+    selector = SelectKBest(chi2, k=k)
+
+    # chi2: go through each column, add -1 * smallest number, if
+    # negative, as it can't handle negative numbers.
+    def normalise_column(col):
+        x_min = col.min()
+        if x_min < 0:
+            col += (-1 * x_min)
+        return col
+
+    all_data = np.apply_along_axis(normalise_column, 0, dataset)
+    _ = selector.fit_transform(all_data, labels)
+    return selector.get_support(indices=True)
+
+
+
+def try_feature_reduction(ok, broken, args):
+    all_data = np.append(ok, broken, axis=0)
+
+    labels = list((ok.shape[0] * [common.PREDICT_OK])
+                  + (broken.shape[0] * [common.PREDICT_FAIL]))
+
+    keep_columns = reduce_features(all_data, labels, args.k)
+
+    for x in keep_columns:
+        print(args.feature_labels[x])
+
+
 def make_kmeans_graph(ok, broken, args):
     import matplotlib.pyplot as plt
     from sklearn.cluster import KMeans
@@ -320,6 +357,12 @@ if __name__ == '__main__':
                         default="cern_disks",
                         choices=["cern_disks", "zhu_disks", "random",
                                  "cern_bad_blocks"])
+    parser.add_argument("--reduce-features", "-f",
+                        dest="reduce_features",
+                        type=int,
+                        help="reduce to this number of features",
+                        default=None)
+
     common.add_subcommands(parent=parser,
                            descriptions=[
                                ('best_settings',
@@ -440,6 +483,15 @@ if __name__ == '__main__':
                                 ],
                                 make_kmeans_graph),
 
+                               ('feature_reductions',
+                                "Try out various feature reduction techniques",
+                                [
+                                    (['-k','--target-feature-count'],
+                                     {'type': int,
+                                      'dest': 'k',
+                                      'default': 2}),
+                                ],
+                                try_feature_reduction),
                                ])
 
     args = parser.parse_args()
@@ -486,16 +538,33 @@ if __name__ == '__main__':
              ok.shape[0],
              ok.shape[0]/train_data.shape[0]*100)
 
-    assert set(ok[:,0]) == set([0]), "Non-OK labeled drives in OK set"
-    assert set(broken[:,0]) == set([1]), "Only broken drives in broken set"
-
     if not args.dont_shuffle:
         np.random.shuffle(ok)
         np.random.shuffle(broken)
         log.info("Shuffled dataset")
 
+    assert set(ok[:,0]) == set([0]), "Non-OK labeled drives in OK set"
+    assert set(broken[:,0]) == set([1]), "Only broken drives in broken set"
+
     ok = common.remove_labels(ok)
     broken = common.remove_labels(broken)
+
+    if args.reduce_features and args.reduce_features <= broken.shape[1]:
+        log.info("Applying Chi-squared feature reduction to %d features",
+                 args.reduce_features)
+        labels = list((ok.shape[0] * [common.PREDICT_OK])
+                      + (broken.shape[0] * [common.PREDICT_FAIL]))
+        feature_indices = reduce_features(np.append(ok, broken, axis=0), labels,
+                                          args.reduce_features)
+        log.debug("Got the following feature indices: %s",
+                  ", ".join([str(x) for x in feature_indices]))
+        args.feature_labels = list(np.array(args.feature_labels)[feature_indices])
+        log.info("Reduced to using the following features %s",
+                 ", ".join(args.feature_labels))
+        ok = ok[:, feature_indices]
+        broken = broken[:, feature_indices]
+
     log.info("Finished pre-processing data")
+    log.debug("Using features %s", ", ".join(args.feature_labels))
 
     args.func(ok=ok, broken=broken, args=args)

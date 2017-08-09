@@ -10,6 +10,7 @@ import argparse
 import statistics
 import csv
 import itertools
+import json
 from calendar import month_abbr
 
 import pytz
@@ -170,6 +171,32 @@ SMART_LENGTH = len(SMART_FIELDS)
 SMART_MYSTERY_LENGTH = 220
 SMART_MYSTERY_KEEP_LENGTH = len(SMART_MYSTERY_FIELDS_KEEP)
 SMART_RAW_IDX = 3
+values_in_window = ["bad_block_count",
+                    "bad_block_stdev",
+                    "trouble_log_count",
+                    "read_error_count",
+                    *["smart_raw_%s" % SMART_NAMES[f] for f in
+                      SMART_FIELDS],
+                    *["smart_mystery_%d" % f for f in
+                      SMART_MYSTERY_FIELDS_KEEP],
+                    "cpio_blocks_read",
+                    "blocks_read",
+                    "blocks_written",
+                    "verifies",
+                    "max_q",
+                    *["io_completed_count_%d_ms" % t for t in
+                      [4, 8, 16, 30, 50, 100, 200, 400, 800,
+                       2000, 4000, 16000, 30000, 45000,
+                       60000, 100000]],
+                    *["sense_%d" % i for i in SENSE_FIELDS_KEEP],
+                    "avg_io",
+                    "max_io",
+                    "retry_count",
+                    "timeout_count",
+]
+window_field_names = [*values_in_window,
+                      *["{}_delta".format(wn) for wn in values_in_window]]
+FIELD_NAMES = ['is_broken', 'disk_type', *window_field_names]
 
 
 def time_ranges(start, end, step_size):
@@ -1404,37 +1431,8 @@ def prepare_training_data(es, cache_db, bad_blocks=False):
 
 
 def make_training_data(es, args):
-    # Writeback = False: we just want to cache results, not modify them.
-
-
-    values_in_window = ["bad_block_count",
-                        "bad_block_stdev",
-                        "trouble_log_count",
-                        "read_error_count",
-                        *["smart_raw_%s" % SMART_NAMES[f] for f in
-                          SMART_FIELDS],
-                        *["smart_mystery_%d" % f for f in
-                          SMART_MYSTERY_FIELDS_KEEP],
-                        "cpio_blocks_read",
-                        "blocks_read",
-                        "blocks_written",
-                        "verifies",
-                        "max_q",
-                        *["io_completed_count_%d_ms" % t for t in
-                          [4, 8, 16, 30, 50, 100, 200, 400, 800,
-                           2000, 4000, 16000, 30000, 45000,
-                           60000, 100000]],
-                        *["sense_%d" % i for i in SENSE_FIELDS_KEEP],
-                        "avg_io",
-                        "max_io",
-                        "retry_count",
-                        "timeout_count",
-    ]
-    window_field_names = [*values_in_window,
-                          *["{}_delta".format(wn) for wn in values_in_window]]
-    fieldnames = ['is_broken', 'disk_type', *window_field_names]
-    log.info("Using field names %s", ", ".join(fieldnames))
-
+    # Writeback = False: we just want to cache results, not modify them
+    log.info("Using field names %s", ", ".join(FIELD_NAMES))
 
     with shelve.open(CACHE_LOCATION,
                      writeback=False) as cache_db:
@@ -1452,7 +1450,7 @@ def make_training_data(es, args):
                                 delimiter=';',
                                 quotechar='|',
                                 quoting=csv.QUOTE_MINIMAL)
-            writer.writerow(fieldnames)
+            writer.writerow(FIELD_NAMES)
             for row in dataset:
                 writer.writerow(row)
 
@@ -1606,12 +1604,13 @@ def predict_failures(es, args):
     # Failures will happen in [BUFFER_TIME + 2 windows, BUFFER_TIME]
     window_dimensions = [(now - WINDOW_SIZE * 2, now - WINDOW_SIZE),
                          (now - WINDOW_SIZE, now)]
+    predicted_failures = 0
 
     with shelve.open(CACHE_LOCATION, writeback=False) as cache_db:
         for disk in get_disks(es):
             disk_label = disk['disk_location']
             cluster = disk['cluster_name']
-            log.info("Getting predictions for %s %s",
+            log.debug("Getting predictions for %s %s",
                      cluster, disk_label)
 
             try:
@@ -1633,8 +1632,54 @@ def predict_failures(es, args):
             except Exception:
                 log.exception("Error generating data window for predictions")
 
-            prediction = clf.predict(window_2)
-            log.info(prediction)
+            log.debug("Window is: %s", window_2)
+            # Remember to remove the is_broken column
+            window = np.array([window_2[1:]])
+            feature_names = FIELD_NAMES[1:]
+
+
+            if args.features:
+                window = window[:, args.features]
+                feature_names = list(np.array(feature_names)[args.features])
+
+            log.debug("Feature names: %s", ", ".join(feature_names))
+
+            named_window = {f: v for f, v in zip(feature_names, [float(x) for x in window[0]])}
+            log.debug("Window was: %s", json.dumps(named_window, indent=4))
+
+            prediction = clf.predict(window)[0]
+
+            if prediction == common.PREDICT_FAIL:
+                predicted_failures += 1
+                print("{} {} is predicted to fail between {} and {}!"
+                      .format(cluster,
+                              disk_label, str(now + TIME_BEFORE_FAILURE),
+                              str(now + TIME_BEFORE_FAILURE + WINDOW_SIZE)))
+                node_indicator = clf.decision_path(window)
+
+                leave_id = clf.apply(window)
+                feature = clf.tree_.feature
+                threshold = clf.tree_.threshold
+                node_index = node_indicator.indices[node_indicator.indptr[0]:
+                                                    node_indicator.indptr[1]]
+                for node_id in node_index:
+                    if leave_id[0] != node_id:
+                        continue
+                    if (window[0, feature[node_id]] <= threshold[node_id]):
+                        threshold_sign = "<="
+                    else:
+                        threshold_sign = ">"
+
+                    print("\tReason: {} {} {} (was: {})"
+                          .format(feature_names[feature[node_id]+1],
+                                  threshold_sign,
+                                  threshold[node_id],
+                                  window[0, feature[node_id]]))
+            else:
+                log.info("%s %s not predicted to fail within the given timeframe",
+                         cluster, disk_label)
+    print("Predicted {} failures".format(predicted_failures))
+
 
 
 if __name__ == '__main__':
@@ -1707,6 +1752,11 @@ if __name__ == '__main__':
                                      {'type': str,
                                       'help': 'Date and time for prediction (default: now)',
                                       'default': 'now'}),
+                                    (['-f', '--features'],
+                                     {'type': str,
+                                      'help': "A comma-separated list of feature indices",
+                                      'dest': 'features',
+                                      'default': None}),
                                 ],
                                 predict_failures),
                            ])
@@ -1715,4 +1765,10 @@ if __name__ == '__main__':
     daiquiri.setup()
     common.set_log_level_from_args(args, log)
     es_conn = common.es_conn_from_args(args)
+
+    if not args.features:
+        args.features = []
+    else:
+        args.features = [int(x) for x in args.features.split(",")]
+
     args.func(es=es_conn, args=args)

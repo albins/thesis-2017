@@ -183,6 +183,7 @@ def filter_unchanged_disk_data(data, keep_columns):
         if set(data["%s_delta" % x]) == set([0]):
             log.warning("Dropping column %s due to no deltas", x)
             del data[x]
+            del data["%s_delta" % x]
     return data
 
 def disk_training_set():
