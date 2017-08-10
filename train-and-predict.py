@@ -15,6 +15,7 @@ from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import f_classif, chi2
 from sklearn.feature_selection import SelectKBest
+from sklearn.externals import joblib
 from scipy.stats import mode
 import daiquiri
 import palettable
@@ -211,7 +212,11 @@ def try_predict(ok, broken, args):
 def make_tree(ok, broken, args):
     broken_p = args.percent_broken
     ok_p = args.percent_ok
-    if args.nrounds:
+    if args.from_model:
+        t = joblib.load(args.from_model)
+        tpr, far = -1, -1
+
+    elif args.nrounds:
         tpr, far, t = predict_best(broken, ok, keep_broken=broken_p/100,
                                    keep_nonbroken=ok_p/100,
                                    nrounds=args.nrounds,
@@ -430,10 +435,15 @@ if __name__ == '__main__':
                                       'help': "Run n iterations in stead of one",
                                       'dest': 'nrounds',
                                       'default': None}),
-                                    (['-m','--max-depth'],
+                                    (['-d','--max-depth'],
                                      {'type': int,
                                       'help': "Force tree to be of this maximum depth",
                                       'dest': 'max_depth',
+                                      'default': None}),
+                                    (['-m','--from-model'],
+                                     {'type': str,
+                                      'help': "Use this model file",
+                                      'dest': 'from_model',
                                       'default': None}),
                                 ],
                                 make_tree),

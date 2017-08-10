@@ -1588,6 +1588,31 @@ def make_graph(es, args):
                                    label_rotation=rotate,
                                    show_every_nth_label=show_every)
 
+
+def explain_decision(clf, window, feature_names):
+    node_indicator = clf.decision_path(window)
+
+    feature = clf.tree_.feature
+    threshold = clf.tree_.threshold
+    node_index = node_indicator.indices[node_indicator.indptr[0]:
+                                        node_indicator.indptr[1]]
+
+    path = []
+
+    for node_id in node_index:
+        if (window[0, feature[node_id]] <= threshold[node_id]):
+            threshold_sign = "<="
+        else:
+            threshold_sign = ">"
+
+        path.append("{} {} {} (was: {})"
+              .format(feature_names[feature[node_id]],
+                      threshold_sign,
+                      threshold[node_id],
+                      window[0, feature[node_id]]))
+    return " -> ".join(path)
+
+
 def predict_failures(es, args):
     from sklearn.externals import joblib
 
@@ -1655,29 +1680,11 @@ def predict_failures(es, args):
                       .format(cluster,
                               disk_label, str(now + TIME_BEFORE_FAILURE),
                               str(now + TIME_BEFORE_FAILURE + WINDOW_SIZE)))
-                node_indicator = clf.decision_path(window)
-
-                leave_id = clf.apply(window)
-                feature = clf.tree_.feature
-                threshold = clf.tree_.threshold
-                node_index = node_indicator.indices[node_indicator.indptr[0]:
-                                                    node_indicator.indptr[1]]
-                for node_id in node_index:
-                    if leave_id[0] != node_id:
-                        continue
-                    if (window[0, feature[node_id]] <= threshold[node_id]):
-                        threshold_sign = "<="
-                    else:
-                        threshold_sign = ">"
-
-                    print("\tReason: {} {} {} (was: {})"
-                          .format(feature_names[feature[node_id]+1],
-                                  threshold_sign,
-                                  threshold[node_id],
-                                  window[0, feature[node_id]]))
+                print(explain_decision(clf, window, feature_names))
             else:
                 log.info("%s %s not predicted to fail within the given timeframe",
                          cluster, disk_label)
+                log.info(explain_decision(clf, window, feature_names))
     print("Predicted {} failures".format(predicted_failures))
 
 
