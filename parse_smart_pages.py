@@ -64,12 +64,12 @@ def es_count_disks_by_cluster(es, index, q):
             "group_by_cluster": {
                 "terms": {
                     #"size": 0,
-                    "field": "cluster_name"
+                    "field": "cluster_name.keyword"
                 },
                 "aggs": {
                     "count_distinct_disks": {
                         "cardinality": {
-                            "field": "disk_location",
+                            "field": "disk_location.keyword",
                             "precision_threshold": 4000,
                         }
                     }
@@ -1008,7 +1008,10 @@ def es_get_disks(es, index):
     s = s[0]
     q = s.to_dict()
     cluster_disks = {}
-    res = es.search(index=index, body=q)
+    res = scan(es, query=q, index=index)
+    for x in res:
+        print(x)
+
     buckets = get_buckets(res, 'group_by_cluster')
     for bucket in buckets:
         cluster = bucket['key']

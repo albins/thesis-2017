@@ -6,12 +6,15 @@ import pandas
 import math
 import random
 import os
+import urllib3
 
 import numpy as np
 from elasticsearch import Elasticsearch
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import palettable
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 log = logging.getLogger(__name__)
 
