@@ -52,6 +52,10 @@ ES_INDEX_BASE = 'itdb_netapp-lowlevel'
 ES_INDEX = 'itdb_netapp-lowlevel-*'
 LOW_LEVEL_DATA_Q = '*'
 
+EST_CLUSTER_COUNT = 12
+EST_MAX_DISK_COUNT_FOR_CLUSTER = 1200
+EST_DISK_PRECISION_THRESH = 4600
+
 
 def es_count_disks_by_cluster(es, index, q):
     """
@@ -63,14 +67,14 @@ def es_count_disks_by_cluster(es, index, q):
         "aggs": {
             "group_by_cluster": {
                 "terms": {
-                    #"size": 0,
+                    "size": EST_CLUSTER_COUNT,
                     "field": "cluster_name.keyword"
                 },
                 "aggs": {
                     "count_distinct_disks": {
                         "cardinality": {
                             "field": "disk_location.keyword",
-                            "precision_threshold": 4000,
+                            "precision_threshold": EST_DISK_PRECISION_THRESH,
                         }
                     }
                 }
@@ -1003,14 +1007,14 @@ def es_get_disks(es, index):
     """
 
     s = Search()
-    s.aggs.bucket('group_by_cluster', 'terms', field='cluster_name.keyword')\
-          .bucket('disks', 'terms', field='disk_location.keyword')
+    s.aggs.bucket('group_by_cluster', 'terms', field='cluster_name.keyword',
+                  size=EST_CLUSTER_COUNT)\
+          .bucket('disks', 'terms', field='disk_location.keyword',
+                  size=EST_MAX_DISK_COUNT_FOR_CLUSTER)
     s = s[0]
     q = s.to_dict()
     cluster_disks = {}
-    res = scan(es, query=q, index=index)
-    for x in res:
-        print(x)
+    res = es.search(body=q, index=index)
 
     buckets = get_buckets(res, 'group_by_cluster')
     for bucket in buckets:
@@ -1044,7 +1048,7 @@ def es_get_high_water_mark(es, index):
          "aggs": {
              "group_by_cluster": {
                  "terms": {
-                     #"size": 0,
+                     "size": EST_CLUSTER_COUNT,
                      "field": "cluster_name.keyword",
                      "order": {
                          "max_time": "desc"
