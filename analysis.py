@@ -1691,6 +1691,13 @@ def predict_failures(es, args):
 
 if __name__ == '__main__':
     parser = common.make_es_base_parser()
+    parser.add_argument(
+        '--use-features', '-f',
+        dest='features',
+        default=None,
+        type=str,
+        help="Comma-separated list of feature indices to use (from trainer script)")
+
     common.add_subcommands(parent=parser,
                            descriptions=[
                                ('report',
