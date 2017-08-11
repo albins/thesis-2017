@@ -5,6 +5,8 @@ import logging
 import pandas
 import math
 import random
+import os
+import urllib3
 
 import numpy as np
 from elasticsearch import Elasticsearch
@@ -12,9 +14,11 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import palettable
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 log = logging.getLogger(__name__)
 
-ELASTIC_ADDRESS = "localhost:9200"
+ELASTIC_ADDRESS = "es-itdb.cern.ch:9203"
 ZHU_FEATURE_LABELS = [
     "Disk ID",
     "Is broken",
@@ -50,6 +54,10 @@ def es_conn_from_args(args):
     log.debug("Setting up ES connection using %s", args)
     es = Elasticsearch([args.es_nodes],
                        timeout=args.timeout,
+                       use_ssl=True,
+                       verify_certs=False,
+                       http_auth=(os.environ['ES_USERNAME'],
+                                  os.environ['ES_PASSWORD']),
                        #retry_on_timeout=True,
     )
     return es

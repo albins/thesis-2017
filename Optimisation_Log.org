@@ -1,0 +1,12 @@
+| Improvement | Runtime | Improved % | Acc Improved |
+|-------------+---------+------------+--------------|
+| None        |    2.85 |         0% |              |
+| [1]         |    2.59 |   9.122870 | 9.1228070    |
+| [2]         |    2.56 |  1.1583012 | 10.175439    |
+| [3]         |    2.45 |   4.296875 | 14.035088    |
+
+#+TBLFM: $3=((@4$2-$2)/@4$2)*100::$4=((@2$2-$2)/@2$2)*100
+
+[1] Strip lines centrally
+[2] Use str.startswith() for detecting SMART pages
+[3] Stricter disk regexes
