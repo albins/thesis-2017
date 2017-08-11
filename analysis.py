@@ -1078,7 +1078,7 @@ def all_disks(es):
 
     ok_index = "{}-2017-06-21*".format(ES_LOWLEVEL_BASE)
     search_start = datetime(2017, 6, 21, tzinfo=pytz.utc)
-    search_end = search_start + timedelta(minutes=20)
+    search_end = search_start + timedelta(minutes=50)
 
     s = Search(using=es, index=ok_index)\
         .filter("range", **{'@timestamp':
