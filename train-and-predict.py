@@ -12,6 +12,7 @@ from common import sample_matrix, tree_as_pdf, verify_training
 
 import numpy as np
 from sklearn import tree
+from sklearn import svm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import f_classif, chi2
 from sklearn.feature_selection import SelectKBest
@@ -78,14 +79,21 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
 
     if not nrounds:
         with common.timed(task_name="training"):
-            c = classifier(random_state=42, max_depth=max_depth)
+            if classifier is not svm.SVC:
+                c = classifier(random_state=42, max_depth=max_depth)
+            else:
+                c = classifier(random_state=42)
+
             model = c.fit(training_set, labels)
 
             return verify_training(model, verification_set, expected_labels)
     else:
         results = []
         for i in range(0, nrounds):
-            c = classifier(random_state=i, max_depth=max_depth)
+            if classifier is not svm.SVC:
+                c = classifier(random_state=i, max_depth=max_depth)
+            else:
+                c = classifier(random_state=i)
             model = c.fit(training_set, labels)
             results.append(verify_training(model, verification_set,
                                            expected_labels))
@@ -165,7 +173,7 @@ def best_settings(ok, broken, args):
 def try_predict(ok, broken, args):
     broken_p = args.percent_broken
     ok_p = args.percent_ok
-    if not args.do_random_forest:
+    if args.classifier == "tree":
         log.debug("Using normal classification tree")
         if not args.nrounds >= 2:
             tpr, far, tree = predict(broken, ok, keep_broken=broken_p/100,
@@ -176,12 +184,19 @@ def try_predict(ok, broken, args):
                               keep_nonbroken=ok_p/100, nrounds=args.nrounds,
                               max_depth=args.max_depth)
 
-    else:
+    elif args.classifier == "random_forest":
         log.debug("Using random forest")
         tpr, far, tree = predict(broken, ok, keep_broken=broken_p/100,
                                   keep_nonbroken=ok_p/100,
                                   classifier=RandomForestClassifier)
-    if args.nrounds >= 2 and not args.do_random_forest:
+    elif args.classifier == "svm":
+        log.debug("Using SVM!")
+        results = predict(broken, ok, keep_broken=broken_p/100,
+                          keep_nonbroken=ok_p/100, nrounds=args.nrounds,
+                          max_depth=args.max_depth,
+                          classifier=svm.SVC)
+
+    if args.nrounds >= 2:
         tprs = [x[0] for x in results]
         fars = [x[1] for x in results]
 
@@ -192,12 +207,12 @@ def try_predict(ok, broken, args):
         _, _, tree = results[0]
 
         def int_mode(xs):
-            return mode([int(x * 100)/100 for x in tprs]).mode[0]
+            return mode([int(x * 100)/100 for x in xs]).mode[0]
 
         print("Result: TPR: [{}, {}] (stdev={}, mode={}, median={}), FAR [{}, {}] (stedv={}, mode={}, median={}) at mix {}% from failed set, {}% from OK set"
-                  .format(min(tprs), max(tprs), stdev(tprs), int_mode(tprs), median(tprs),
-                          min(fars),  max(fars), stdev(tprs), int_mode(tprs), median(tprs),
-                          broken_p, ok_p))
+              .format(min(tprs), max(tprs), stdev(tprs), int_mode(tprs), median(tprs),
+                      min(fars),  max(fars), stdev(fars), int_mode(fars), median(fars),
+                      broken_p, ok_p))
     else:
         print("Result: TPR: {}, FAR {} at mix {}% from failed set, {}% from OK set"
               .format(tpr, far, broken_p, ok_p))
@@ -297,7 +312,13 @@ def make_kmeans_graph(ok, broken, args):
     from sklearn.preprocessing import scale
     from sklearn.decomposition import PCA
 
-    all_data = np.append(ok, broken, axis=0)
+    if args.use_at_most == -1:
+        log.info("Using equal proportions of broken/non-broken data!")
+        half_broken_length = int(broken.shape[0]/2)
+        ok_subset = ok[:half_broken_length]
+        all_data = np.append(ok_subset, broken, axis=0)
+    else:
+        all_data = np.append(ok, broken, axis=0)
 
     if args.use_at_most:
         use_at_most = min(args.use_at_most, all_data.shape[0])
@@ -400,11 +421,12 @@ if __name__ == '__main__':
                                 [
                                     (['percent_broken'], {'type': int}),
                                     (['percent_ok'], {'type': int}),
-                                    (['--random-forest', '-r'],
-                                     {'action': 'store_true',
-                                      'dest': "do_random_forest",
-                                      'help': "use a random forest",
-                                      'default': False}),
+                                    (['--use-classifier', '-c'],
+                                     {'type': str,
+                                      'dest': "classifier",
+                                      'help': "use this classifier",
+                                      'default': "tree",
+                                      'choices': ["svm", "tree", "random_forest"]}),
                                     (['-n', '--nrounds'],
                                      {'type': int,
                                       'help': "Run n iterations in stead of one",

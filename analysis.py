@@ -1698,82 +1698,63 @@ if __name__ == '__main__':
         type=str,
         help="Comma-separated list of feature indices to use (from trainer script)")
 
-    common.add_subcommands(parent=parser,
-                           descriptions=[
-                               ('report',
-                                "Generate reports",
-                                [(['include'],
-                                  {'type': str,
-                                   'nargs':'+',
-                                   'choices':
-                                   ["scrub",
-                                    "bad_blocks",
-                                    "broken_disks",
-                                    "correlation",
-                                    "prediction_stats"]})],
-                                make_report),
-                               ('training',
-                                "Generate training data",
-                                [
-                                    (['-w', '--writefile'],
-                                     {'type': argparse.FileType('w'),
-                                      'default': '-'}),
-                                    (['-t','--type'],
-                                     {'type': str,
-                                      'choices': ['disks', 'bad_blocks'],
-                                      'dest': 'op_type',
-                                      'default': 'disks'}),
-                                ],
-                                make_training_data),
-                               ('disk',
-                                "Show history for a given disk",
-                                [
-                                    (['cluster'], {'type': str}),
-                                    (['disk_location'], {'type': str})
-                                ],
-                                make_disk_report),
+    common.add_subcommands(parent=parser, descriptions=[ ('report',
+                                                          "Generate reports", [(['include'], {'type':
+                                                                                              str, 'nargs':'+', 'choices': ["scrub",
+                                                                                                                            "bad_blocks", "broken_disks", "correlation",
+                                                                                                                            "prediction_stats"]})], make_report),
+                                                         ('training', "Generate training data", [
+                                                             (['-w', '--writefile'], {'type':
+                                                                                      argparse.FileType('w'), 'default': '-'}),
+                                                             (['-t','--type'], {'type': str, 'choices':
+                                                                                ['disks', 'bad_blocks'], 'dest': 'op_type',
+                                                                                'default': 'disks'}), ], make_training_data),
+                                                         ('disk', "Show history for a given disk", [
+                                                             (['cluster'], {'type': str}),
+                                                             (['disk_location'], {'type': str}) ],
+                                                          make_disk_report),
 
-                               ('graph',
-                                "Produce graphs and histograms",
-                                [
-                                    (['-w', '--writefile'],
-                                     {'type': str,
-                                      'default': 'histogram.pdf'}),
-                                    (['graph_type'],
-                                     {'type': str,
-                                      'choices':
-                                      ["bad_blocks_cluster",
-                                       "bad_blocks_month",
-                                       "bad_disks_cluster",
-                                       "bad_disks_month",
-                                       "reconstruction_time",
-                                       "disk_copy_time",
-                                       "scrubbing_time"]}),
-                                ],
-                                make_graph),
-                               ('predict_failures',
-                                "Predict failures using a model",
-                                [
-                                    (['-m', '--disk-failure-predictor'],
-                                     {'type': str,
-                                      'default': 'disk_failure_model.pkl',
-                                      'dest': 'disk_predictor_file',
-                                      'help':
-                                      'file containing a serialised predictor for disk failures'
-                                    }),
+                                                         ('graph',
+                                                          "Produce graphs and histograms",
+                                                          [
+                                                              (['-w', '--writefile'],
+                                                               {'type': str,
+                                                                'default': 'histogram.pdf'}),
+                                                              (['graph_type'],
+                                                               {'type': str,
+                                                                'choices':
+                                                                ["bad_blocks_cluster",
+                                                                 "bad_blocks_month",
+                                                                 "bad_disks_cluster",
+                                                                 "bad_disks_month",
+                                                                 "reconstruction_time",
+                                                                 "disk_copy_time",
+                                                                 "scrubbing_time"]}),
+                                                          ],
+                                                          make_graph),
+                                                         ('predict_failures',
+                                                          "Predict failures using a model",
+                                                          [
+                                                              (['-m', '--disk-failure-predictor'],
+                                                               {'type': str,
+                                                                'default': 'disk_failure_model.pkl',
+                                                                'dest': 'disk_predictor_file',
+                                                                'help':
+                                                                'file containing a serialised predictor for disk failures'
+                                                               }),
 
-                                    (['-a', '--at'],
-                                     {'type': str,
-                                      'help': 'Date and time for prediction (default: now)',
-                                      'default': 'now'}),
-                                    (['-f', '--features'],
-                                     {'type': str,
-                                      'help': "A comma-separated list of feature indices",
-                                      'dest': 'features',
-                                      'default': None}),
-                                ],
-                                predict_failures),
-                           ])
+                                                              (['-a', '--at'],
+                                                               {'type': str,
+                                                                'help': 'Date and time for prediction (default: now)',
+                                                                'default': 'now'}),
+                                                              (['-f', '--features'],
+                                                               {'type': str,
+                                                                'help': "A comma-separated list of feature indices",
+                                                                'dest': 'features',
+                                                                'default': None}),
+                                                          ],
+                                                          predict_failures),
+    ])
 
     args = parser.parse_args()
     daiquiri.setup()
