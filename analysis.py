@@ -24,6 +24,7 @@ import numpy as np
 import humanize
 import shelve
 import tzlocal
+from sklearn import tree
 
 log = daiquiri.getLogger()
 
@@ -1687,11 +1688,13 @@ def predict_failures(es, args):
                       .format(cluster,
                               disk_label, str(now + TIME_BEFORE_FAILURE),
                               str(now + TIME_BEFORE_FAILURE + WINDOW_SIZE)))
-                print(explain_decision(clf, window, feature_names))
+                if isinstance(clf, tree.DecisionTreeClassifier):
+                    print(explain_decision(clf, window, feature_names))
             else:
                 log.info("%s %s not predicted to fail within the given timeframe",
                          cluster, disk_label)
-                log.info(explain_decision(clf, window, feature_names))
+                if isinstance(clf, tree.DecisionTreeClassifier):
+                    log.info(explain_decision(clf, window, feature_names))
     print("Predicted {} failures".format(predicted_failures))
 
 
