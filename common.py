@@ -105,10 +105,12 @@ def format_counter(counter):
 
 
 @contextmanager
-def timed(task_name, time_record=[], printer=log.debug):
+def timed(task_name, time_record=None, printer=log.debug):
     start_time = time.clock()
     yield
     end_time = time.clock()
+    if time_record is None:
+        time_record = []
     printer("Task {} ran in {:06.4f}s"
             .format(task_name, end_time - start_time))
     time_record.append(end_time - start_time)
