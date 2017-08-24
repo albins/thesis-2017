@@ -2,10 +2,10 @@
 import random
 import math
 import itertools
-import logging
-import sys
 from statistics import median, stdev
 import argparse
+from collections import defaultdict
+import threading
 
 import common
 from common import sample_matrix, tree_as_pdf, verify_training
@@ -30,8 +30,8 @@ random.seed(42)
 def predict_best(*args, **kwargs):
     # Sort on highest TPR, then lowest FAR:
     results = predict(*args, **kwargs)
-    results.sort(key=lambda tup: tup[1], reverse=False)
     results.sort(reverse=True, key=lambda tup: tup[0])
+    results.sort(key=lambda tup: tup[1], reverse=False)
     return results[0]
 
 
@@ -44,18 +44,20 @@ def predict_worst(*args, **kwargs):
 
 def predict(broken, ok_disks, keep_broken, keep_nonbroken,
             classifier=tree.DecisionTreeClassifier, nrounds=None,
-            max_depth=None):
+            max_depth=None, min_samples_leaf=1):
 
     if keep_broken == 0 and keep_nonbroken == 0:
-        log.info("Using equal proportions broken/non-broken")
+        log.debug("Using equal proportions broken/non-broken")
         # Use equal proportions
-        half_broken_length = int(broken.shape[0]/2)
+        half_broken_length = int(broken.shape[0] * 0.7)
 
         training_broken = broken[:half_broken_length]
         witheld_broken = broken[half_broken_length:]
 
-        training_ok = ok_disks[:half_broken_length]
-        witheld_ok = ok_disks[half_broken_length:]
+        ok_selected_amount = max(200, half_broken_length)
+
+        training_ok = ok_disks[:ok_selected_amount]
+        witheld_ok = ok_disks[ok_selected_amount:]
     else:
         training_broken, witheld_broken = sample_matrix(
             broken,
@@ -80,7 +82,8 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
     if not nrounds:
         with common.timed(task_name="training"):
             if classifier is not svm.SVC:
-                c = classifier(random_state=42, max_depth=max_depth)
+                c = classifier(random_state=42, max_depth=max_depth,
+                               min_samples_leaf=min_samples_leaf)
             else:
                 c = classifier(random_state=42)
 
@@ -91,7 +94,8 @@ def predict(broken, ok_disks, keep_broken, keep_nonbroken,
         results = []
         for i in range(0, nrounds):
             if classifier is not svm.SVC:
-                c = classifier(random_state=i, max_depth=max_depth)
+                c = classifier(random_state=i, max_depth=max_depth,
+                               min_samples_leaf=min_samples_leaf)
             else:
                 c = classifier(random_state=i)
             model = c.fit(training_set, labels)
@@ -173,28 +177,35 @@ def best_settings(ok, broken, args):
 def try_predict(ok, broken, args):
     broken_p = args.percent_broken
     ok_p = args.percent_ok
+
+    predict_kwargs = {'keep_broken': broken_p/100,
+                      'keep_nonbroken': ok_p/100,
+                      'nrounds': args.nrounds,
+                      'max_depth': args.max_depth,
+                      'min_samples_leaf': args.min_samples_leaf}
+
     if args.classifier == "tree":
         log.debug("Using normal classification tree")
-        if not args.nrounds >= 2:
-            tpr, far, tree = predict(broken, ok, keep_broken=broken_p/100,
-                                     keep_nonbroken=ok_p/100,
-                                     max_depth=args.max_depth)
-        else:
-            results = predict(broken, ok, keep_broken=broken_p/100,
-                              keep_nonbroken=ok_p/100, nrounds=args.nrounds,
-                              max_depth=args.max_depth)
-
+        predict_kwargs['classifier'] = tree.DecisionTreeClassifier
     elif args.classifier == "random_forest":
         log.debug("Using random forest")
-        tpr, far, tree = predict(broken, ok, keep_broken=broken_p/100,
-                                  keep_nonbroken=ok_p/100,
-                                  classifier=RandomForestClassifier)
+        predict_kwargs['classifier'] = RandomForestClassifier
     elif args.classifier == "svm":
         log.debug("Using SVM!")
-        results = predict(broken, ok, keep_broken=broken_p/100,
-                          keep_nonbroken=ok_p/100, nrounds=args.nrounds,
-                          max_depth=args.max_depth,
-                          classifier=svm.SVC)
+        predict_kwargs['classifier'] = svm.SVC
+
+        # These options don't apply:
+        del predict_kwargs['max_depth']
+        del predict_kwargs['min_samples_leaf']
+    else:
+        assert False, "Unknown classifier!"
+
+    if not args.nrounds >= 2:
+        del predict_kwargs['nrounds']
+
+        tpr, far, model = predict(broken, ok, **predict_kwargs)
+    else:
+        results = predict(broken, ok, **predict_kwargs)
 
     if args.nrounds >= 2:
         tprs = [x[0] for x in results]
@@ -204,7 +215,7 @@ def try_predict(ok, broken, args):
         # low to high
         results.sort(key=lambda tup: tup[1], reverse=False)
         results.sort(reverse=True, key=lambda tup: tup[0])
-        _, _, tree = results[0]
+        _, _, model = results[0]
 
         def int_mode(xs):
             return mode([int(x * 100)/100 for x in xs]).mode[0]
@@ -221,7 +232,7 @@ def try_predict(ok, broken, args):
         log.info("Dumping model to %s", args.dump_model_file)
 
         from sklearn.externals import joblib
-        joblib.dump(tree, args.dump_model_file)
+        joblib.dump(model, args.dump_model_file)
 
 
 def make_tree(ok, broken, args):
@@ -235,11 +246,13 @@ def make_tree(ok, broken, args):
         tpr, far, t = predict_best(broken, ok, keep_broken=broken_p/100,
                                    keep_nonbroken=ok_p/100,
                                    nrounds=args.nrounds,
-                                   max_depth=args.max_depth)
+                                   max_depth=args.max_depth,
+                                   min_samples_leaf=args.min_samples_leaf)
     else:
         tpr, far, t = predict(broken, ok, keep_broken=broken_p/100,
                               keep_nonbroken=ok_p/100,
-                              max_depth=args.max_depth)
+                              max_depth=args.max_depth,
+                              min_samples_leaf=args.min_samples_leaf)
 
     target_file = args.writefile
 
@@ -367,6 +380,106 @@ def make_kmeans_graph(ok, broken, args):
     log.info("Wrote to {}".format(args.writefile))
 
 
+def do_experiments(ok, broken, args):
+    log.info("Running experiment %s", args.experiment_name)
+
+    feature_counts = [*list(range(1, args.max_features+1, args.features_step)), "all"]
+    max_depths = [*list(range(1, args.max_depths+1)), None]
+
+    all_data = np.append(ok, broken, axis=0)
+    labels = list((ok.shape[0] * [common.PREDICT_OK])
+                  + (broken.shape[0] * [common.PREDICT_FAIL]))
+    nrounds = args.nrounds
+
+    log.info("Generating feature sets...")
+    feature_sets = [reduce_features(all_data, labels, n)
+                    for n in feature_counts]
+    log.info("Done generating feature sets")
+
+    try:
+        leaf_start, leaf_end = [int(x) for x in args.min_samples_leaf.split("-")]
+    except ValueError:
+        leaf_start = int(args.min_samples_leaf)
+        leaf_end = -1
+
+    if leaf_start <= leaf_end:
+        samples_leaf_values = range(leaf_start, leaf_end + 1)
+    else:
+        samples_leaf_values = [leaf_start]
+
+    log.info("Using leaves from %d -- %d", leaf_start, leaf_end)
+
+    threads = []
+
+    def dump_model(filename, tree_model):
+        log.info("Dumping model to %s", filename)
+        joblib.dump(tree_model, filename)
+
+
+    def do_experiment(all_data, feature_indices, max_depth, min_samples_leaf):
+        feature_count = len(feature_indices)
+        log.info("Doing an experiment with %d features, %s max_depth, of %d tests with at least %d samples per leaf",
+                 feature_count, max_depth, nrounds, min_samples_leaf)
+
+        tpr, far, tree = predict_best(
+            broken=broken[:, feature_indices],
+            ok_disks=ok[:, feature_indices],
+            keep_broken=0,
+            keep_nonbroken=0,
+            nrounds=nrounds,
+            max_depth=max_depth,
+            min_samples_leaf=min_samples_leaf)
+
+        if args.model_basename:
+            dump_model_file = "{}-{}_{}_{}.mdl".format(
+                args.model_basename,
+                feature_count,
+                min_samples_leaf,
+                max_depth)
+            t = threading.Thread(
+                target=dump_model,
+                kwargs={'filename': dump_model_file,
+                        'tree_model': tree})
+            threads.append(t)
+            t.start()
+
+        return tpr, far
+
+    for min_samples_leaf in samples_leaf_values:
+        results = defaultdict(dict)
+        log.info("Doing experiments...")
+        for features in feature_sets:
+            for max_depth in max_depths:
+                feature_count = len(features)
+                tpr, far = do_experiment(all_data, features, max_depth,
+                                         min_samples_leaf)
+                results[feature_count][max_depth] = (tpr, far)
+
+        print(common.human_readable_experiment_table(
+            results,
+            mark_far_below=args.mark_far_below,
+            mark_tpr_above=args.mark_tpr_above))
+        if args.writefile:
+            log.info("Writing LaTeX table to %s", args.writefile)
+            label = "tbl:{}_{}".format(
+                args.experiment_name.replace(" ", "_"),
+                min_samples_leaf)
+            with open(args.writefile, 'a') as f:
+                f.write(common.latex_experiment_table(
+                    caption=("Experiment {} results with {} minimum samples per leaf"
+                             .format(args.experiment_name,
+                                     min_samples_leaf)),
+                    label=label,
+                    double_dict=results,
+                    mark_far_below=args.mark_far_below,
+                    mark_tpr_above=args.mark_tpr_above))
+    if threads:
+        log.info("Waiting for threads to finish...")
+    for thread in threads:
+        thread.join()
+        log.debug("Thread finished")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="")
     common.setup_verbosity_flags(parser)
@@ -442,6 +555,11 @@ if __name__ == '__main__':
                                       'help': "Force tree to be of this maximum depth",
                                       'dest': 'max_depth',
                                       'default': None}),
+                                    (['-l', '--min-samples-leaf'],
+                                     {'type': int,
+                                      'help': "Allow at least N samples per leaf",
+                                      'dest': 'min_samples_leaf',
+                                      'default': 1}),
                                 ],
                                 try_predict),
                                ('tree',
@@ -467,6 +585,11 @@ if __name__ == '__main__':
                                       'help': "Use this model file",
                                       'dest': 'from_model',
                                       'default': None}),
+                                    (['-l', '--min-samples-leaf'],
+                                     {'type': int,
+                                      'help': "Allow at least N samples per leaf",
+                                      'dest': 'min_samples_leaf',
+                                      'default': 1}),
                                 ],
                                 make_tree),
                                ('roc_graph',
@@ -524,6 +647,60 @@ if __name__ == '__main__':
                                       'default': 2}),
                                 ],
                                 try_feature_reduction),
+                               ('experiments',
+                                "Perform experiments and generate tables",
+                                [
+                                    (['-w', '--writefile'],
+                                     {'type': str,
+                                      'default': None}),
+                                    (['-n', '--nrounds'],
+                                     {'type': int,
+                                      'help': "Run n iterations in stead of one",
+                                      'dest': 'nrounds',
+                                      'default': 3}),
+                                    (['-d', '--max-depth'],
+                                     {'type': int,
+                                      'help': "Run up to max depth",
+                                      'dest': 'max_depths',
+                                      'default': 5}),
+                                    (['-f', '--max-features'],
+                                     {'type': int,
+                                      'help': "Run up to max features",
+                                      'dest': 'max_features',
+                                      'default': 30}),
+                                    (['-s', '--feature-step'],
+                                     {'type': int,
+                                      'help': "Increment features by this step size",
+                                      'dest': 'features_step',
+                                      'default': 1}),
+                                    (['-l', '--min-samples-leaf'],
+                                     {'type': str,
+                                      'help': "Allow at least N samples per leaf",
+                                      'dest': 'min_samples_leaf',
+                                      'default': "1"}),
+                                    (['-a', '--mark-far-below'],
+                                     {'type': float,
+                                      'help': "Mark FAR:s below this value",
+                                      'dest': 'mark_far_below',
+                                      'default': None}),
+                                    (['-t', '--mark-tpr-above'],
+                                     {'type': float,
+                                      'help': "Mark TPR:s above this value",
+                                      'dest': 'mark_tpr_above',
+                                      'default': None}),
+                                    (['-e', '--experiment-name'],
+                                     {'type': str,
+                                      'help': "Experiment name",
+                                      'dest': 'experiment_name',
+                                      'default': ""}),
+                                    (['-m', '--dump-model-basename'],
+                                     {'type': str,
+                                      'help': "Dump the model to this basename + 1,2,3...",
+                                      'dest': 'model_basename',
+                                      'default': None}),
+                                ],
+                                do_experiments),
+
                                ])
 
     args = parser.parse_args()

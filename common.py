@@ -463,3 +463,98 @@ def verify_training(clf, verification_set, expected_labels):
               true_positives, true_negatives,
               tpr, far)
     return tpr, far, clf
+
+
+def fmt_cell(cell, as_latex=False, tpr_thresh=None, far_thresh=None):
+    if cell is None:
+        if as_latex:
+            return "\\infty"
+        else:
+            return "Infinity"
+    if isinstance(cell, int):
+        return "{}".format(cell)
+
+    tpr_thresh = tpr_thresh if tpr_thresh else float("inf")
+    far_thresh = far_thresh if far_thresh else float("-inf")
+
+    def mark_str(num_fmt_str):
+        if as_latex:
+            return "\\bm{{" + num_fmt_str + "}}"
+        else:
+            return "*{}*".format(num_fmt_str)
+
+    def format_number(f, three_decimals=False):
+        if three_decimals:
+            s = "{:.3f}".format(f)
+        else:
+            s = "{:.2f}".format(f)
+
+        if s[0] == '0':
+            return s[1:]
+        else:
+            return s
+
+    tpr, far = cell
+    formatted_tpr = format_number(tpr)
+    formatted_far = format_number(far, three_decimals=True)
+    if tpr >= tpr_thresh:
+        tpr_str = mark_str(formatted_tpr)
+    else:
+        tpr_str = formatted_tpr
+
+    if far <= far_thresh:
+        far_str = mark_str(formatted_far)
+    else:
+        far_str = formatted_far
+
+    return "{}/{}".format(tpr_str, far_str)
+
+
+def human_readable_experiment_table(double_dict, mark_far_below, mark_tpr_above):
+    """
+    Turn a #features => max depth => (tpr, far) dict to a human-readable
+    table!
+    """
+
+    first_row = [str(k) for k in list(double_dict.values())[0].keys()]
+    data_values = [[k, *list(v.values())] for k, v in double_dict.items()]
+
+    strings = ["\t" + "\t\t".join(first_row)]
+
+    for row in data_values:
+        strings.append("\t".join([fmt_cell(x, as_latex=False,
+                                           tpr_thresh=mark_tpr_above,
+                                           far_thresh=mark_far_below)
+                                  for x in row]))
+    return "\n".join(strings)
+
+
+def latex_experiment_table(double_dict, mark_far_below, mark_tpr_above, caption, label):
+    table_template = """
+    \\begin{{table}}
+    \\caption{{{}}} \\label{{{}}}
+    $\\begin{{array}} {{ *{{{}}}{{c}} }}
+    \\toprule
+    \t & {} \\\\
+    \t \\midrule
+    \t {} \\\\
+    \\bottomrule
+    \\end{{array}}$
+    \\end{{table}}
+    """
+
+    def make_table_row(values):
+        return " & ".join([fmt_cell(x, as_latex=True,
+                                    tpr_thresh=mark_tpr_above,
+                                    far_thresh=mark_far_below)
+                           for x in values])
+
+    first_row = [k for k in list(double_dict.values())[0].keys()]
+    data_values = [[k, *list(v.values())] for k, v in double_dict.items()]
+
+    rows = [make_table_row(row) for row in [first_row, *data_values]]
+    return table_template.format(caption,
+                                 label,
+                                 len(first_row) + 1,
+                                 rows[0],
+                                 " \\\\ \n\t".join(rows[1:]))

@@ -1631,8 +1631,15 @@ def predict_failures(es, args):
                          (now - WINDOW_SIZE, now)]
     predicted_failures = 0
 
+    if args.cluster and args.disk_location:
+        disks = [disk for disk in get_disks(es)
+                 if disk['cluster_name'] == args.cluster
+                 and disk['disk_location'] == args.disk_location]
+    else:
+        disks = get_disks(es)
+
     with shelve.open(CACHE_LOCATION, writeback=False) as cache_db:
-        for disk in get_disks(es):
+        for disk in disks:
             disk_label = disk['disk_location']
             cluster = disk['cluster_name']
             log.debug("Getting predictions for %s %s",
@@ -1686,7 +1693,6 @@ def predict_failures(es, args):
                          cluster, disk_label)
                 log.info(explain_decision(clf, window, feature_names))
     print("Predicted {} failures".format(predicted_failures))
-
 
 
 if __name__ == '__main__':
@@ -1751,6 +1757,18 @@ if __name__ == '__main__':
                                                                {'type': str,
                                                                 'help': "A comma-separated list of feature indices",
                                                                 'dest': 'features',
+                                                                'default': None}),
+
+                                                              (['-c', '--cluster'],
+                                                               {'type': str,
+                                                                'help': "Only for this cluster",
+                                                                'dest': 'cluster',
+                                                                'default': None}),
+
+                                                              (['-d', '--disk-location'],
+                                                               {'type': str,
+                                                                'help': "Only for this location",
+                                                                'dest': 'disk_location',
                                                                 'default': None}),
                                                           ],
                                                           predict_failures),
