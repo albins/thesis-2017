@@ -102,7 +102,7 @@ UTC_NOW =  datetime.fromtimestamp(time.time(), tz=pytz.utc)
 TIME_BEFORE_FAILURE = timedelta(hours=12)
 RECORDING_START = datetime(year=2017, month=5, day=31,
                            hour=13, tzinfo=pytz.utc)
-WINDOW_SIZE = timedelta(hours=24)
+WINDOW_SIZE = timedelta(hours=12)
 
 Q_TROUBLE_EVENTS = Q("bool", should=[*[Q('match', event_type=t)
                                        for t in TROUBLE_REASONS],
